@@ -55,17 +55,21 @@
 
     <div class="panel">
       <h3>Examples</h3>
-      <div style="font-size:11px;color:#53a8b6;margin-bottom:6px">RP2040 (M0+)</div>
+      <div style="font-size:11px;color:#53a8b6;margin-bottom:4px">RP2040 (M0+) - UART/GPIO/Timer</div>
       <div class="btn-row" style="margin-bottom:6px">
-        <button class="btn" onclick="loadPreset('hello_world.uf2')">hello_world</button>
-        <button class="btn" onclick="loadPreset('gpio_test.uf2')">gpio_test</button>
+        <button class="btn" onclick="loadPreset('hello_world.uf2')">hello_world UART</button>
+        <button class="btn" onclick="loadPreset('gpio_test.uf2')">gpio_test GPIO25</button>
+        <button class="btn" onclick="loadPreset('timer_test.uf2')">timer_test</button>
+        <button class="btn" onclick="loadPreset('interrupt_test.uf2')">interrupt</button>
+        <button class="btn" onclick="loadPreset('name_prompt.uf2')">name_prompt</button>
         <button class="btn" onclick="loadPreset('littleos.uf2')">littleOS</button>
       </div>
-      <div style="font-size:11px;color:#53a8b6;margin-bottom:6px">RP2350 (M33 / RV32)</div>
-      <div class="btn-row">
+      <div style="font-size:11px;color:#53a8b6;margin-bottom:4px">RP2350 M33 (ARM) / RV32 (RISC-V)</div>
+      <div class="btn-row" style="margin-bottom:6px">
         <button class="btn" onclick="loadPreset('littleos_pico2.uf2')">littleOS M33</button>
         <button class="btn" onclick="loadPreset('littleos_pico2_riscv.uf2')">littleOS RV32</button>
       </div>
+      <div style="font-size:10px;color:#666">SPI/I2C/PWM/ADC/DMA/PIO/USB via 319 native tests + BME280/W5500/CYW43 compiled</div>
     </div>
 
     <div class="panel">
@@ -325,7 +329,10 @@ fileInput.onchange = (e) => {
 $('status').textContent = 'Initializing WASM...';
 
 try {
-  mod = await BrambleModule();
+  mod = await BrambleModule({
+    print: (t) => console.log(t),
+    printErr: (t) => console.log(t)
+  });
   $('status').textContent = 'Ready - drop a UF2 file to begin';
   $('btn-run').disabled = false;
   $('btn-pause').disabled = false;
