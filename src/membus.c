@@ -926,6 +926,12 @@ static uint32_t sio_fifo_status(int core_id) {
 }
 
 static void sio_write32(uint32_t offset, uint32_t val) {
+    /* GPIO offsets in SIO space - delegate to gpio module */
+    if ((offset >= SIO_GPIO_IN_OFFSET && offset <= 0x2C) ||
+        (offset >= 0x30 && offset <= 0x4C)) {
+        gpio_write32(SIO_BASE + offset, val);
+        return;
+    }
     int core_id = sio_current_core();
     int other_core = (core_id == CORE0) ? CORE1 : CORE0;
 
