@@ -326,8 +326,6 @@ $('status').textContent = 'Initializing WASM...';
 
 try {
   mod = await BrambleModule();
-  mod._bramble_init(0);
-  mod._bramble_set_clock(125);
   $('status').textContent = 'Ready - drop a UF2 file to begin';
   $('btn-run').disabled = false;
   $('btn-pause').disabled = false;
