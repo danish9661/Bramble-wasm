@@ -1,6 +1,11 @@
 # Bramble RP2040/RP2350 Emulator - Roadmap
 
-## Current State: v0.45.0
+## Current State: v0.46.0-WASM
+
+| New | WASM Port | Complete | Emscripten 6.0.9 `-O3 -msimd128` `web/bramble.wasm.{js,wasm}` 156K, `src/bramble_wasm.c` exports, `web/` `Examples` SPI/I2C/PWM/ADC/DMA/PIO/USB for RP2040+RP2350 + MicroPython both chips, Playwright verified `log` not `error`, GitHub Pages `web/.nojekyll` `pages.yml` |
+|-----|-----------|----------|------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
+
+## Previous State: v0.45.0
 
 | Category | Coverage | Notes |
 |----------|----------|-------|
@@ -553,6 +558,23 @@ on M0+. The original roadmap incorrectly listed these.
 - Invalidated alongside icache on RAM writes
 - CLI: `-jit` flag enables block compilation
 - Statistics: block compiles, executions, and accelerated instructions reported on exit
+
+---
+
+## Phase 9: WebAssembly (Browser)
+
+### 9.1 Emscripten Build [COMPLETE]
+
+- `build_wasm.sh` `-O3 -msimd128` `WASM=1 ALLOW_MEMORY_GROWTH=1 MODULARIZE=1 EXPORT_NAME=BrambleModule EXPORT_ES6=1 ENVIRONMENT='web,node'` `web/bramble.wasm.js` 64K + `web/bramble.wasm.wasm` 156K
+- `src/bramble_wasm.c` replaces `main.c` CLI, exports `bramble_init/load/step` etc, `picobin_scan` for RV32, `putchar` intercept `uart_tx_buf[4096]`, stubs for `fuse_mount`/`corepool`/`tapif`/`netbridge`/`wire`
+
+### 9.2 Browser UI [COMPLETE]
+
+- `web/index.html` drag-drop UF2/ELF, `Examples` `hello_world` `gpio_test` `timer_test` `interrupt_test` `name_prompt` `littleos` `spi/i2c/pwm/adc/dma/pio/usb` for RP2040 `0xE48BFF56` and RP2350 `0xE48BFF59` + `micropython` both chips `web/examples/`, serial monitor UART0, GPIO 0-29 `get_gpio_raw`, core PC/SP/halted/MIPS `2.5M` per `requestAnimationFrame`, `web/.nojekyll` `pages.yml` `https://danish9661.github.io/Bramble-wasm/`
+
+### 9.3 Verification [COMPLETE]
+
+- Playwright `chromium --no-sandbox` `8096` all `log` not `error` `print/printErr:console.log`, `hello_world` 229 steps UART `gpio_test` LED, `timer_test` `littleos` `littleos_pico2_riscv` shell, `spi/i2c/pwm/adc/dma/pio/usb` `PASS`, `319/319` native same sources, `bench 18.44 MIPS` `50M` littleOS without `SharedArrayBuffer` `COOP/COEP`
 
 ---
 
