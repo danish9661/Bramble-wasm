@@ -60,6 +60,7 @@ emcc \
   -s STACK_SIZE=1048576 \
   -s NO_EXIT_RUNTIME=1 \
   -s ENVIRONMENT='web,node' \
+  -s EXPORT_ES6=1 \
   -o web/bramble.wasm.js
 
 echo ""

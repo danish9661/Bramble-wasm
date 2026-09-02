@@ -4,6 +4,7 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>Bramble WASM - RP2350 Emulator</title>
+<link rel="icon" type="image/png" href="./bramble-logo.png">
 <style>
   * { margin: 0; padding: 0; box-sizing: border-box; }
   body { font-family: 'Courier New', monospace; background: #1a1a2e; color: #e0e0e0; display: flex; flex-direction: column; height: 100vh; }
@@ -50,6 +51,21 @@
         <input type="file" id="file-input" accept=".uf2,.elf,.bin" style="display:none">
       </div>
       <div class="info-row"><span>File:</span><span class="info-val" id="fw-name">none</span></div>
+    </div>
+
+    <div class="panel">
+      <h3>Examples</h3>
+      <div style="font-size:11px;color:#53a8b6;margin-bottom:6px">RP2040 (M0+)</div>
+      <div class="btn-row" style="margin-bottom:6px">
+        <button class="btn" onclick="loadPreset('hello_world.uf2')">hello_world</button>
+        <button class="btn" onclick="loadPreset('gpio_test.uf2')">gpio_test</button>
+        <button class="btn" onclick="loadPreset('littleos.uf2')">littleOS</button>
+      </div>
+      <div style="font-size:11px;color:#53a8b6;margin-bottom:6px">RP2350 (M33 / RV32)</div>
+      <div class="btn-row">
+        <button class="btn" onclick="loadPreset('littleos_pico2.uf2')">littleOS M33</button>
+        <button class="btn" onclick="loadPreset('littleos_pico2_riscv.uf2')">littleOS RV32</button>
+      </div>
     </div>
 
     <div class="panel">
@@ -279,6 +295,15 @@ async function loadFirmware(data, name) {
   $('status').textContent += ` - ${name}`;
   updateCoreState();
 }
+window.loadPreset = async (name) => {
+  $('status').textContent = `Fetching ${name}...`;
+  try {
+    const res = await fetch('./' + name);
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    const buf = new Uint8Array(await res.arrayBuffer());
+    await loadFirmware(buf, name);
+  } catch(e) { $('status').textContent = `Failed ${name}: ${e.message}`; }
+};
 
 const dropZone = $('drop-zone');
 const fileInput = $('file-input');
