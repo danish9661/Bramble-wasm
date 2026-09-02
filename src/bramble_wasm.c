@@ -28,8 +28,6 @@
 #include "rp2350_rv/rp2350_memmap.h"
 #include "rp2350_rv/picobin.h"
 #include "rp2350_arm/m33_cpu.h"
-#include <pthread.h>
-pthread_mutex_t fuse_flash_mutex = PTHREAD_MUTEX_INITIALIZER;
 
 /* UF2 block structure (copied from uf2.c) */
 typedef struct {
@@ -334,14 +332,3 @@ uint8_t *bramble_get_sram_ptr(void) {
     return rv_bus.sram;
 }
 
-/* Stubs for excluded files (netbridge.c, wire.c, corepool.c) */
-int net_bridge_uart_active(int uart_num) { (void)uart_num; return 0; }
-void net_bridge_uart_tx(int uart_num, uint8_t byte) { (void)uart_num; (void)byte; }
-int wire_uart_active(int uart_num) { (void)uart_num; return 0; }
-void wire_send_uart(int uart_num, uint8_t byte) { (void)uart_num; (void)byte; }
-void corepool_start_core_thread(int core_id) { (void)core_id; }
-void corepool_wake_cores(void) {}
-int tapif_open(const char *name) { (void)name; return -1; }
-void tapif_close(int fd) { (void)fd; }
-int tapif_read(int fd, uint8_t *buf, int maxlen) { (void)fd; (void)buf; (void)maxlen; return 0; }
-int tapif_write(int fd, const uint8_t *buf, int len) { (void)fd; (void)buf; (void)len; return len; }

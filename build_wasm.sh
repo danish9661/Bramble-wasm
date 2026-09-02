@@ -18,7 +18,7 @@ COMMON_FLAGS="-O3 -msimd128 -Wall -Wno-macro-redefined -Wno-logical-not-parenthe
 INCLUDES="-Iinclude/ -Iinclude/rp2350_rv -Iinclude/rp2350_arm"
 
 SOURCES=(
-  src/bramble_wasm.c
+  src/bramble_wasm.c src/fuse_mount_wasm.c src/wasm_net.c
   src/cpu.c src/instructions.c src/thumb32.c src/membus.c
   src/uf2.c src/elf.c src/gpio.c src/timer.c src/uart.c
   src/spi.c src/i2c.c src/pwm.c src/adc.c src/dma.c
