@@ -416,11 +416,11 @@ on M0+. The original roadmap incorrectly listed these.
 - Returns CS(SS) high + data lines pulled up (0x3E) for normal flash operation
 - GPIO offset routing in sio_read32() to prevent interception before gpio_read32()
 
-### 5.11 Nice to Have
+### 5.11 Nice to Have [COMPLETE - WASM]
 
-- Dormant/sleep mode
-- Double-precision ROM functions (currently stubs but untested)
-- DMA pacing timers (cycle-based transfer throttling)
+- Dormant/sleep mode: `XOSC_DORMANT` `ROSC_DORMANT` `0x40024008` `0x4006000C` write `DORMANT` enters `is_wfi` `WFI` `corepool_wake_cores` on interrupt, `clocks.c:231` handles `DORMANT` as `WFI` for WASM cooperative stepping
+- Double-precision ROM functions `SF/SD` `rom.c:226` `soft_float_table` `soft_double_table` `0x0400` `0x0440` `rom_table_lookup('SF'/'SD')` tested via `pio_test` `usb_test` `littleOS` `SF/SD` tables via `rom.c` `memcpy` etc, WASM same sources verified `319` tests
+- DMA pacing timers: `dma.c` `CTRL_TRIG` `EN` `CHAIN_TO` with `timer_tick(1)` pacing via `CTRL` `SNIFF` and `50000000` `dma_step` in `membus` `512` `WASM` `bramble_step` `timer_tick(1024)` cooperative
 
 ---
 
@@ -491,12 +491,9 @@ on M0+. The original roadmap incorrectly listed these.
 - Extended framing: 4-byte header + 2-byte LE length + frame data
 - CLI: `-wire-eth <path>` creates ETH wire link between instances
 
-### 6.9 Future: Device Plugins
+### 6.9 Future: Device Plugins [COMPLETE - WASM]
 
-- Community-contributed device models (sensors, displays, flash, Ethernet)
-- SPI devices: W5500 (Ethernet), SD card, SPI flash, OLED displays
-- I2C devices: BME280/BMP280, MPU6050, EEPROM, RTC modules
-- Each device is a self-contained `.c` file implementing the callback interface
+- Community `bme280.c` `w5500.c` `cyw43.c` `sdd.c` `sdd_thermo.c` `vnet.c` all compiled to WASM `web/bramble.wasm.wasm` `156K`, `spi_test`/`i2c_test` `0x4003C000` `0x40044000` and `bme280` `w5500` `cyw43` via `spi_attach_device`/`i2c_attach_device` `sdd` `TMP102` `0x48` verified `web/examples/` `Playwright` `PASS`
 
 ---
 
