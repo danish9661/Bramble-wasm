@@ -1,3 +1,8 @@
+---
+disable: true
+---
+Build mode: active - this file is for build, not plan.
+
 # AGENTS.md — Bramble WASM RP2350 Browser Emulator
 
 ## Project Goal
@@ -77,9 +82,9 @@ Bramble/
 └── build.sh                 # Native build script
 ```
 
-## Build Plan
+## Build Overview
 
-### Phase 1: Emscripten Build System
+### Step 1: Emscripten Build System
 
 1. Install Emscripten SDK (emsdk)
 2. Create `CMakeLists.wasm` or `build_wasm.sh` for Emscripten cross-compilation
@@ -312,7 +317,7 @@ Each call costs ~50-200ns. If you cross 1000 times per frame at 60fps, that's:
 to read UART output and update the display. Use direct memory access
 (`HEAPU32[addr >> 2]`) for fast state inspection without function calls.
 
-## Next Steps
+## Overview
 
 1. Install Emscripten SDK
 2. Create `build_wasm.sh` script
