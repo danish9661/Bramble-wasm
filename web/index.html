@@ -73,6 +73,15 @@
     </div>
 
     <div class="panel">
+      <h3>Peripherals (RP2040 + RP2350)</h3>
+      <div style="font-size:10px;line-height:1.4">
+        <b style="color:#53a8b6">RP2040:</b> GPIO 0-29 SIO 0xD0000000, UART 0x40034000 PL011, SPI PL022, I2C DW_apb_i2c, Timer 0x40054000, PWM 8 slices, ADC, DMA 12ch, PIO 2 blocks, USB, RTC, SIO<br>
+        <b style="color:#53a8b6">RP2350:</b> +520KB SRAM 0x20000000, 32KB ROM, CLINT 0xC000000, TIMER1, PIO2, 48 GPIO, M33/RV32, QMI, OTP, BOOTRAM<br>
+        <b style="color:#53a8b6">Tested:</b> <span style="color:#e94560">hello_world UART</span>, <span style="color:#e94560">gpio_test LED25</span>, <span style="color:#e94560">timer_test</span>, <span style="color:#e94560">interrupt</span>, <span style="color:#e94560">littleOS</span> both chips, 319 tests
+      </div>
+    </div>
+
+    <div class="panel">
       <h3>Controls</h3>
       <div class="btn-row">
         <button class="btn" id="btn-run">Run</button>

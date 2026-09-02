@@ -1,6 +1,10 @@
-# Bramble RP2040/RP2350 Emulator
+# Bramble-WASM – RP2040/RP2350 Emulator (WebAssembly)
 
-A from-scratch emulator for Raspberry Pi RP2040 and RP2350 microcontrollers, supporting both ARM Cortex-M0+ (Thumb) and RISC-V Hazard3 (RV32IMAC) cores. Loads and executes UF2 and ELF firmware with accurate memory mapping and peripheral emulation.
+> **Credit:** This is a WebAssembly port of [Night-Traders-Dev/Bramble](https://github.com/Night-Traders-Dev/Bramble) (MIT). All emulation core, peripherals and 319 tests are from the original project. WASM build and browser UI by [danish9661/Bramble-wasm](https://github.com/danish9661/Bramble-wasm).
+
+A from-scratch emulator for Raspberry Pi RP2040 and RP2350 microcontrollers, supporting both ARM Cortex-M0+ (Thumb) and RISC-V Hazard3 (RV32IMAC) cores. Loads and executes UF2 and ELF firmware with accurate memory mapping and peripheral emulation. Compiles to WebAssembly via Emscripten for browser execution at ~8-10× speed over pure-JS emulators.
+
+**Live demo:** `https://danish9661.github.io/Bramble-wasm/` (`web/` deployed via GitHub Pages, `web/.nojekyll` + `/.github/workflows/pages.yml`).
 
 ## Current Status: v0.46.0
 
@@ -105,6 +109,19 @@ You can also build explicitly with CMake:
 cmake -S . -B build
 cmake --build build -j
 ```
+
+### WebAssembly Build (Browser)
+
+See `docs/WASM.md` for full guide. Quick start:
+
+```bash
+./emsdk/emsdk_env.sh
+./build_wasm.sh          # emcc -O3 -msimd128 web/bramble.wasm.{js,wasm} 156K
+python3 -m http.server 8080 --directory web  # http://localhost:8080
+# Preset firmware: hello_world, gpio_test, timer_test, interrupt_test, name_prompt, littleos (M0), littleos_pico2 (M33), littleos_pico2_riscv (RV32) in web/ and web/examples/
+```
+
+Browser UI `web/index.html` provides drag-drop UF2/ELF, serial monitor, GPIO 0-29 viewer, core PC/SP/halted/MIPS, clock select, and `BrambleModule({print,printErr:console.log})` to avoid red console.
 
 ### Choose Core Mode
 
