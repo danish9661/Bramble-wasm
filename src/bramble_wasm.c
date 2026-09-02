@@ -219,6 +219,19 @@ int bramble_get_gpio(int pin) {
     return gpio_get_pin((uint8_t)pin);
 }
 
+int bramble_get_gpio_raw(int pin) {
+    if (pin >= 48) return 0;
+    return (gpio_state.gpio_out >> pin) & 1;
+}
+
+uint32_t bramble_get_gpio_out(void) {
+    return gpio_state.gpio_out;
+}
+
+uint32_t bramble_get_gpio_oe(void) {
+    return gpio_state.gpio_oe;
+}
+
 void bramble_set_gpio(int pin, int val) {
     gpio_set_pin((uint8_t)pin, (uint8_t)val);
 }

@@ -147,7 +147,7 @@ function updateGpio() {
     for (let i = 16; i < 30; i++) hi.innerHTML += `<div class="gpio-pin" id="gpio-${i}">${i}</div>`;
   }
   for (let i = 0; i < 30; i++) {
-    const val = mod._bramble_get_gpio(i);
+    const val = mod._bramble_get_gpio_raw(i) || mod._bramble_get_gpio(i);
     const el = $(`gpio-${i}`);
     if (el) el.className = 'gpio-pin ' + (val ? 'high' : 'low');
   }
@@ -251,8 +251,10 @@ async function loadFirmware(data, name) {
   if (rafId) cancelAnimationFrame(rafId);
 
   // Auto-detect arch from filename
-  const isRV = /riscv|rv32|pico2_riscv/i.test(name);
-  mod._bramble_init(isRV ? 1 : 0);
+  const isRV = /riscv|rv32/i.test(name);
+  const isPico2 = /pico2/i.test(name);
+  const arch = isRV ? 1 : (isPico2 ? 2 : 0);
+  mod._bramble_init(arch);
   mod._bramble_set_clock(parseInt($('clock-select').value));
 
   uartText = '';

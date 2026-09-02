@@ -37,7 +37,7 @@ EXPORTS='[
   "_bramble_load_uf2","_bramble_load_elf",
   "_bramble_step","_bramble_set_clock",
   "_bramble_read_uart","_bramble_read_uart_bulk","_bramble_write_uart",
-  "_bramble_get_gpio","_bramble_set_gpio",
+  "_bramble_get_gpio","_bramble_get_gpio_raw","_bramble_get_gpio_out","_bramble_get_gpio_oe","_bramble_set_gpio",
   "_bramble_mem_read32","_bramble_mem_write32",
   "_bramble_is_halted","_bramble_get_core_state",
   "_bramble_get_flash_ptr","_bramble_get_sram_ptr",
