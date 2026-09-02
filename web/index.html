@@ -54,22 +54,40 @@
     </div>
 
     <div class="panel">
-      <h3>Examples</h3>
-      <div style="font-size:11px;color:#53a8b6;margin-bottom:4px">RP2040 (M0+) - UART/GPIO/Timer</div>
-      <div class="btn-row" style="margin-bottom:6px">
-        <button class="btn" onclick="loadPreset('hello_world.uf2')">hello_world UART</button>
-        <button class="btn" onclick="loadPreset('gpio_test.uf2')">gpio_test GPIO25</button>
-        <button class="btn" onclick="loadPreset('timer_test.uf2')">timer_test</button>
+      <h3>Examples - RP2040 (M0+)</h3>
+      <div class="btn-row" style="margin-bottom:4px">
+        <button class="btn" onclick="loadPreset('hello_world.uf2')">hello_world</button>
+        <button class="btn" onclick="loadPreset('gpio_test.uf2')">gpio_test</button>
+        <button class="btn" onclick="loadPreset('timer_test.uf2')">timer</button>
         <button class="btn" onclick="loadPreset('interrupt_test.uf2')">interrupt</button>
         <button class="btn" onclick="loadPreset('name_prompt.uf2')">name_prompt</button>
         <button class="btn" onclick="loadPreset('littleos.uf2')">littleOS</button>
+        <button class="btn" onclick="loadPreset('micropython_rp2040.uf2')">MicroPython</button>
       </div>
-      <div style="font-size:11px;color:#53a8b6;margin-bottom:4px">RP2350 M33 (ARM) / RV32 (RISC-V)</div>
       <div class="btn-row" style="margin-bottom:6px">
+        <button class="btn" onclick="loadPreset('spi_test.uf2')">SPI 0x4003C000</button>
+        <button class="btn" onclick="loadPreset('i2c_test.uf2')">I2C 0x40044000</button>
+        <button class="btn" onclick="loadPreset('pwm_test.uf2')">PWM</button>
+        <button class="btn" onclick="loadPreset('adc_test.uf2')">ADC</button>
+        <button class="btn" onclick="loadPreset('dma_test.uf2')">DMA</button>
+        <button class="btn" onclick="loadPreset('pio_test.uf2')">PIO</button>
+        <button class="btn" onclick="loadPreset('usb_test.uf2')">USB</button>
+      </div>
+      <div style="font-size:11px;color:#53a8b6;margin-bottom:4px">RP2350 M33 (ARM) / RV32 (RISC-V) - 520KB SRAM</div>
+      <div class="btn-row" style="margin-bottom:4px">
         <button class="btn" onclick="loadPreset('littleos_pico2.uf2')">littleOS M33</button>
         <button class="btn" onclick="loadPreset('littleos_pico2_riscv.uf2')">littleOS RV32</button>
+        <button class="btn" onclick="loadPreset('micropython_rp2350.uf2')">MicroPython</button>
       </div>
-      <div style="font-size:10px;color:#666">SPI/I2C/PWM/ADC/DMA/PIO/USB via 319 native tests + BME280/W5500/CYW43 compiled</div>
+      <div class="btn-row">
+        <button class="btn" onclick="loadPreset('spi_test_pico2.uf2')">SPI M33</button>
+        <button class="btn" onclick="loadPreset('i2c_test_pico2.uf2')">I2C M33</button>
+        <button class="btn" onclick="loadPreset('pwm_test_pico2.uf2')">PWM M33</button>
+        <button class="btn" onclick="loadPreset('adc_test_pico2.uf2')">ADC M33</button>
+        <button class="btn" onclick="loadPreset('dma_test_pico2.uf2')">DMA M33</button>
+        <button class="btn" onclick="loadPreset('pio_test_pico2.uf2')">PIO M33</button>
+        <button class="btn" onclick="loadPreset('usb_test_pico2.uf2')">USB M33</button>
+      </div>
     </div>
 
     <div class="panel">
