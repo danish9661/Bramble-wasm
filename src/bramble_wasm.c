@@ -154,7 +154,13 @@ int bramble_load_elf(const uint8_t *data, int len) {
 
 void bramble_reset(void) {
     if (current_arch == ARCH_RV32) {
-        rv_cpu_reset(&rv_cores[0], 0x00000000);
+        picobin_info_t pbi = picobin_scan(cpu.flash, 4096);
+        if (pbi.found && pbi.entry_pc != 0) {
+            rv_cpu_reset(&rv_cores[0], pbi.entry_pc);
+            if (pbi.entry_sp != 0) rv_cores[0].x[2] = pbi.entry_sp;
+        } else {
+            rv_cpu_reset(&rv_cores[0], 0x00000000);
+        }
         rv_cpu_reset(&rv_cores[1], 0x00000000);
         rv_cores[1].is_halted = 1;
         rv_cores[0].bus = &rv_bus;
