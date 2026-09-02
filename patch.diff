@@ -1,0 +1,12 @@
+--- src/rp2350_rv/rv_cpu.c
++++ src/rp2350_rv/rv_cpu.c
+@@ -714,6 +714,10 @@
+         fprintf(stderr, "[RV-CORE%d] PC=0x%08X instr=0x%08X op=0x%02X rd=%u rs1=%u rs2=%u f3=%u f7=0x%02X\n",
+                 cpu->hart_id, pc, instr, opcode, rd, rs1, rs2, funct3, funct7);
+     }
++    if (pc >= 0x10002BFC && pc <= 0x10002C08) {
++        fprintf(stderr, ">>> PC=0x%08X: x15=0x%08X\n", pc, cpu->x[15]);
++    }
+ 
+     switch (opcode) {
+ 

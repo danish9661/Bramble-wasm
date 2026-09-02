@@ -1,0 +1,193 @@
+/*
+ * RP2040 PIO (Programmable I/O) Emulation
+ *
+ * Two PIO blocks (PIO0, PIO1), each with:
+ * - 4 state machines (SM0-SM3)
+ * - 32-word shared instruction memory
+ * - Per-SM: CLKDIV, EXECCTRL, SHIFTCTRL, ADDR, INSTR, PINCTRL
+ * - Per-SM: TX/RX FIFOs (4-deep each)
+ * - Global: CTRL, FSTAT, FDEBUG, FLEVEL, IRQ, IRQ_FORCE
+ *
+ * This is a register-level implementation that allows SDK code to
+ * configure PIO without crashing. Actual PIO instruction execution
+ * is not emulated — FIFOs accept writes and return 0 on reads.
+ */
+
+#ifndef PIO_H
+#define PIO_H
+
+#include <stdint.h>
+
+/* ========================================================================
+ * PIO Base Addresses
+ * ======================================================================== */
+
+#define PIO0_BASE           0x50200000
+#define PIO1_BASE           0x50300000
+#define PIO2_BASE           0x50400000  /* RP2350 only */
+#define PIO_BLOCK_SIZE      0x1000
+#define PIO_NUM_BLOCKS      3  /* PIO0, PIO1, PIO2 (PIO2 is RP2350 only) */
+#define PIO_NUM_SM           4
+#define PIO_INSTR_MEM_SIZE  32
+
+/* ========================================================================
+ * Register Offsets (from PIO base)
+ * ======================================================================== */
+
+#define PIO_CTRL            0x000
+#define PIO_FSTAT           0x004
+#define PIO_FDEBUG          0x008
+#define PIO_FLEVEL          0x00C
+#define PIO_TXF0            0x010
+#define PIO_TXF1            0x014
+#define PIO_TXF2            0x018
+#define PIO_TXF3            0x01C
+#define PIO_RXF0            0x020
+#define PIO_RXF1            0x024
+#define PIO_RXF2            0x028
+#define PIO_RXF3            0x02C
+#define PIO_IRQ             0x030
+#define PIO_IRQ_FORCE       0x034
+#define PIO_INPUT_SYNC_BYPASS 0x038
+#define PIO_DBG_PADOUT      0x03C
+#define PIO_DBG_PADOE       0x040
+#define PIO_DBG_CFGINFO     0x044
+#define PIO_INSTR_MEM0      0x048  /* 32 words: 0x048-0x0C4 */
+
+/* Per-SM register offsets (SM0 base = 0x0C8, stride = 0x18) */
+#define PIO_SM0_CLKDIV      0x0C8
+#define PIO_SM0_EXECCTRL     0x0CC
+#define PIO_SM0_SHIFTCTRL    0x0D0
+#define PIO_SM0_ADDR         0x0D4
+#define PIO_SM0_INSTR        0x0D8
+#define PIO_SM0_PINCTRL      0x0DC
+#define PIO_SM_STRIDE        0x018  /* 6 registers * 4 bytes */
+
+/* Interrupt registers */
+#define PIO_INTR            0x128
+#define PIO_IRQ0_INTE       0x12C
+#define PIO_IRQ0_INTF       0x130
+#define PIO_IRQ0_INTS       0x134
+#define PIO_IRQ1_INTE       0x138
+#define PIO_IRQ1_INTF       0x13C
+#define PIO_IRQ1_INTS       0x140
+
+/* ========================================================================
+ * CTRL bits
+ * ======================================================================== */
+
+#define PIO_CTRL_SM_ENABLE_MASK     0x0F
+#define PIO_CTRL_SM_RESTART_MASK    (0x0F << 4)
+#define PIO_CTRL_CLKDIV_RESTART_MASK (0x0F << 8)
+
+/* ========================================================================
+ * FSTAT bits (per-SM FIFO status, 4 bits each)
+ * ======================================================================== */
+
+#define PIO_FSTAT_TXFULL_SHIFT  16
+#define PIO_FSTAT_TXEMPTY_SHIFT 24
+#define PIO_FSTAT_RXFULL_SHIFT  0
+#define PIO_FSTAT_RXEMPTY_SHIFT 8
+
+/* ========================================================================
+ * PIO Instruction Encoding
+ * ======================================================================== */
+
+/* Opcodes (bits [15:13]) */
+#define PIO_OP_JMP   0
+#define PIO_OP_WAIT  1
+#define PIO_OP_IN    2
+#define PIO_OP_OUT   3
+#define PIO_OP_PUSH_PULL 4
+#define PIO_OP_MOV   5
+#define PIO_OP_IRQ   6
+#define PIO_OP_SET   7
+
+/* FIFO depth per SM */
+#define PIO_FIFO_DEPTH  4
+
+/* ========================================================================
+ * Per-SM FIFO
+ * ======================================================================== */
+
+typedef struct {
+    uint32_t data[PIO_FIFO_DEPTH];
+    uint8_t  rd;
+    uint8_t  wr;
+    uint8_t  count;
+} pio_fifo_t;
+
+/* ========================================================================
+ * Per-SM State
+ * ======================================================================== */
+
+typedef struct {
+    /* Configuration registers (written by CPU) */
+    uint32_t clkdiv;
+    uint32_t execctrl;
+    uint32_t shiftctrl;
+    uint32_t addr;          /* Current PC (read-only to CPU) */
+    uint32_t instr;         /* SM_INSTR register (force-exec) */
+    uint32_t pinctrl;
+
+    /* Runtime state (PIO execution engine) */
+    uint32_t x;             /* Scratch register X */
+    uint32_t y;             /* Scratch register Y */
+    uint32_t isr;           /* Input shift register */
+    uint32_t osr;           /* Output shift register */
+    uint8_t  isr_count;     /* Bits shifted into ISR */
+    uint8_t  osr_count;     /* Bits remaining in OSR */
+    uint8_t  pc;            /* Program counter (0-31) */
+    uint8_t  stalled;       /* SM is stalled (waiting) */
+    uint8_t  exec_pending;  /* Force-exec instruction pending */
+
+    /* FIFOs */
+    pio_fifo_t tx_fifo;     /* TX: CPU writes, SM pulls */
+    pio_fifo_t rx_fifo;     /* RX: SM pushes, CPU reads */
+
+    /* Clock divider accumulator (16.8 fixed-point) */
+    uint32_t clk_frac_acc;
+} pio_sm_t;
+
+/* ========================================================================
+ * Per-PIO Block State
+ * ======================================================================== */
+
+typedef struct {
+    uint32_t ctrl;
+    uint32_t fdebug;
+    uint32_t irq;
+    uint32_t irq_force;
+    uint32_t input_sync_bypass;
+
+    /* Instruction memory */
+    uint32_t instr_mem[PIO_INSTR_MEM_SIZE];
+
+    /* State machines */
+    pio_sm_t sm[PIO_NUM_SM];
+
+    /* Interrupt registers */
+    uint32_t irq0_inte;
+    uint32_t irq0_intf;
+    uint32_t irq1_inte;
+    uint32_t irq1_intf;
+} pio_block_t;
+
+extern pio_block_t pio_state[PIO_NUM_BLOCKS];
+
+/* ========================================================================
+ * API
+ * ======================================================================== */
+
+void     pio_init(void);
+int      pio_match(uint32_t addr);  /* Returns 0/1 for PIO block, -1 if not */
+uint32_t pio_read32(int pio_num, uint32_t offset);
+void     pio_write32(int pio_num, uint32_t offset, uint32_t val);
+
+/* Step all enabled state machines in all PIO blocks (call from main loop) */
+void     pio_step(void);
+
+/* Execute one PIO instruction on a specific SM */
+void     pio_sm_exec(int pio_num, int sm_num, uint16_t instr);
+
+#endif /* PIO_H */

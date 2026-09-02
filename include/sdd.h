@@ -1,0 +1,104 @@
+#ifndef SDD_H
+#define SDD_H
+
+#include <stdint.h>
+
+/* ========================================================================
+ * Bramble Software-Defined Device (SDD) Framework
+ *
+ * Pluggable virtual peripherals that attach to the emulator via I2C, SPI,
+ * or the virtual network bus. Each SDD is a self-contained device model
+ * with optional periodic tick, bus callbacks, and network RX.
+ *
+ * Built-in devices:
+ *   thermometer   — TMP102-compatible I2C temperature sensor (addr 0x48)
+ *
+ * Usage:
+ *   -sdd thermometer              Use default temperature (25.0 C)
+ *   -sdd thermometer:temp=37.5    Set initial temperature
+ *   -sdd thermometer:i2c=1        Attach to I2C1 instead of I2C0
+ *
+ * Custom devices can be added by implementing the sdd_device_t interface
+ * and calling sdd_register().
+ * ======================================================================== */
+
+#define SDD_MAX_DEVICES    8
+#define SDD_NAME_LEN      32
+#define SDD_MAX_OPTS      64
+
+/* Device interface */
+typedef struct sdd_device {
+    char name[SDD_NAME_LEN];
+
+    /* I2C attachment (optional, -1 if not I2C) */
+    int i2c_bus;                /* 0 or 1 */
+    int i2c_addr;               /* 7-bit address, -1 if not I2C */
+    int (*i2c_write)(void *ctx, uint8_t data);
+    uint8_t (*i2c_read)(void *ctx);
+    void (*i2c_start)(void *ctx);
+    void (*i2c_stop)(void *ctx);
+
+    /* SPI attachment (optional) */
+    int spi_bus;                /* 0 or 1, -1 if not SPI */
+    uint8_t (*spi_xfer)(void *ctx, uint8_t mosi);
+    void (*spi_cs)(void *ctx, int active);
+
+    /* Network attachment (optional) */
+    void (*net_rx)(void *ctx, const uint8_t *frame, int len);
+    uint8_t mac[6];             /* Virtual MAC, zero = none */
+
+    /* Periodic tick (optional, called from main loop) */
+    void (*tick)(void *ctx, uint32_t elapsed_us);
+
+    /* Cleanup */
+    void (*cleanup)(void *ctx);
+
+    void *ctx;                  /* Device-specific state */
+} sdd_device_t;
+
+/* Global SDD registry */
+typedef struct {
+    sdd_device_t devices[SDD_MAX_DEVICES];
+    int count;
+} sdd_registry_t;
+
+extern sdd_registry_t sdd_registry;
+
+/* ======================================================================== */
+/* Lifecycle                                                                 */
+/* ======================================================================== */
+
+/* Initialize the SDD registry */
+void sdd_init(void);
+
+/* Cleanup all registered devices */
+void sdd_cleanup(void);
+
+/* ======================================================================== */
+/* Registration                                                              */
+/* ======================================================================== */
+
+/* Register a device. Automatically attaches to I2C/SPI bus and vnet.
+ * Returns device index or -1 on error. */
+int  sdd_register(sdd_device_t *dev);
+
+/* ======================================================================== */
+/* Main Loop                                                                 */
+/* ======================================================================== */
+
+/* Tick all registered devices */
+void sdd_tick_all(uint32_t elapsed_us);
+
+/* ======================================================================== */
+/* Built-in Device Factories                                                 */
+/* ======================================================================== */
+
+/* Parse a -sdd argument and create the appropriate device.
+ * Format: "type[:key=val,key=val,...]"
+ * Returns 0 on success, -1 if type is unknown. */
+int  sdd_create_from_arg(const char *arg);
+
+/* Create a TMP102-compatible thermometer SDD */
+int  sdd_create_thermometer(float initial_temp, int i2c_bus, int i2c_addr);
+
+#endif /* SDD_H */

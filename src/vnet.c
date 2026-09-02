@@ -1,0 +1,472 @@
+/*
+ * Bramble Virtual Network Bus
+ *
+ * Central frame routing layer. Device models register as ports, and all
+ * Ethernet frames are routed between ports, the TAP interface, and peer
+ * Bramble instances.
+ *
+ * Peer connections use a simple length-prefixed framing over Unix domain
+ * sockets: [4-byte LE length][Ethernet frame]. This enables Ethernet-level
+ * bridging between multiple emulator instances.
+ */
+
+#include <stdio.h>
+#include <string.h>
+#include <unistd.h>
+#include <fcntl.h>
+#include <errno.h>
+#include <poll.h>
+#include <sys/socket.h>
+#include <sys/un.h>
+#include "vnet.h"
+#include "tapif.h"
+
+vnet_state_t vnet;
+
+/* ========================================================================
+ * Utility
+ * ======================================================================== */
+
+static void set_nonblock(int fd) {
+    int flags = fcntl(fd, F_GETFL, 0);
+    if (flags != -1)
+        fcntl(fd, F_SETFL, flags | O_NONBLOCK);
+}
+
+void vnet_generate_mac(uint8_t *mac, int index) {
+    /* Locally administered, unicast: bit 1 of first byte set, bit 0 clear */
+    mac[0] = 0x02;
+    mac[1] = 0xBB;  /* "Bramble" */
+    mac[2] = 0x00;
+    mac[3] = 0x00;
+    mac[4] = 0x00;
+    mac[5] = (uint8_t)(index & 0xFF);
+}
+
+static int is_broadcast(const uint8_t *mac) {
+    return mac[0] == 0xFF && mac[1] == 0xFF && mac[2] == 0xFF &&
+           mac[3] == 0xFF && mac[4] == 0xFF && mac[5] == 0xFF;
+}
+
+static int mac_match(const uint8_t *a, const uint8_t *b) {
+    return memcmp(a, b, VNET_MAC_LEN) == 0;
+}
+
+/* ========================================================================
+ * Lifecycle
+ * ======================================================================== */
+
+int vnet_init(void) {
+    memset(&vnet, 0, sizeof(vnet));
+    vnet.tap_fd = -1;
+    for (int i = 0; i < VNET_MAX_PEERS; i++) {
+        vnet.peers[i].fd = -1;
+        vnet.peers[i].listen_fd = -1;
+    }
+    /* Gateway MAC: 02:BB:00:00:00:01 */
+    vnet_generate_mac(vnet.gateway_mac, 1);
+    vnet.enabled = 1;
+    return 0;
+}
+
+void vnet_cleanup(void) {
+    /* Close TAP */
+    if (vnet.tap_fd >= 0) {
+        tapif_close(vnet.tap_fd);
+        vnet.tap_fd = -1;
+    }
+
+    /* Close peers */
+    for (int i = 0; i < vnet.peer_count; i++) {
+        vnet_peer_t *p = &vnet.peers[i];
+        if (p->fd >= 0) {
+            close(p->fd);
+            p->fd = -1;
+        }
+        if (p->listen_fd >= 0) {
+            close(p->listen_fd);
+            unlink(p->path);
+            p->listen_fd = -1;
+        }
+    }
+
+    if (vnet.frames_tx + vnet.frames_rx > 0) {
+        vnet_report_stats();
+    }
+
+    vnet.enabled = 0;
+}
+
+/* ========================================================================
+ * TAP Bridge
+ * ======================================================================== */
+
+int vnet_attach_tap(const char *name) {
+    if (!name || !name[0]) name = VNET_TAP_NAME;
+
+    int fd = tapif_open(name);
+    if (fd < 0) return -1;
+
+    vnet.tap_fd = fd;
+    strncpy(vnet.tap_name, name, sizeof(vnet.tap_name) - 1);
+    vnet.tap_name[sizeof(vnet.tap_name) - 1] = '\0';
+    fprintf(stderr, "[VNet] TAP '%s' attached (fd=%d)\n", vnet.tap_name, fd);
+    return 0;
+}
+
+/* ========================================================================
+ * Port Registration
+ * ======================================================================== */
+
+int vnet_register_port(const char *name, vnet_port_type_t type,
+                       const uint8_t *mac, vnet_rx_fn rx_fn, void *ctx) {
+    if (vnet.port_count >= VNET_MAX_PORTS) {
+        fprintf(stderr, "[VNet] Maximum ports (%d) reached\n", VNET_MAX_PORTS);
+        return -1;
+    }
+
+    int idx = vnet.port_count++;
+    vnet_port_t *port = &vnet.ports[idx];
+    port->active = 1;
+    port->type = type;
+    strncpy(port->name, name ? name : "unknown", sizeof(port->name) - 1);
+    port->name[sizeof(port->name) - 1] = '\0';
+    port->rx_fn = rx_fn;
+    port->ctx = ctx;
+
+    if (mac) {
+        memcpy(port->mac, mac, VNET_MAC_LEN);
+    } else {
+        /* Auto-assign a locally-administered MAC */
+        vnet_generate_mac(port->mac, idx + 10);
+    }
+
+    fprintf(stderr, "[VNet] Port %d registered: %s (MAC=%02X:%02X:%02X:%02X:%02X:%02X)\n",
+            idx, port->name,
+            port->mac[0], port->mac[1], port->mac[2],
+            port->mac[3], port->mac[4], port->mac[5]);
+    return idx;
+}
+
+void vnet_unregister_port(int port_idx) {
+    if (port_idx < 0 || port_idx >= vnet.port_count) return;
+    vnet.ports[port_idx].active = 0;
+    vnet.ports[port_idx].rx_fn = NULL;
+    vnet.ports[port_idx].ctx = NULL;
+}
+
+/* ========================================================================
+ * Frame Transmission
+ * ======================================================================== */
+
+/* Forward a frame to the TAP interface */
+static void vnet_tap_tx(const uint8_t *frame, int len) {
+    if (vnet.tap_fd >= 0 && len > 0) {
+        tapif_write(vnet.tap_fd, frame, len);
+    }
+}
+
+/* Forward a frame to all connected peers */
+static void vnet_peers_tx(const uint8_t *frame, int len) {
+    for (int i = 0; i < vnet.peer_count; i++) {
+        vnet_peer_t *p = &vnet.peers[i];
+        if (p->fd < 0) continue;
+
+        /* Length-prefixed framing: 4-byte LE length + frame */
+        uint32_t le_len = (uint32_t)len;
+        uint8_t hdr[4];
+        hdr[0] = (le_len >>  0) & 0xFF;
+        hdr[1] = (le_len >>  8) & 0xFF;
+        hdr[2] = (le_len >> 16) & 0xFF;
+        hdr[3] = (le_len >> 24) & 0xFF;
+
+        /* Best-effort write (non-blocking) */
+        ssize_t n = write(p->fd, hdr, 4);
+        if (n == 4) {
+            n = write(p->fd, frame, len);
+            if (n > 0) vnet.frames_peer_tx++;
+        }
+        if (n < 0 && errno != EAGAIN && errno != EWOULDBLOCK) {
+            fprintf(stderr, "[VNet] Peer %s: write error, disconnecting\n", p->path);
+            close(p->fd);
+            p->fd = -1;
+        }
+    }
+}
+
+void vnet_tx_frame(int src_port, const uint8_t *frame, int len) {
+    if (len < 14) return;  /* Minimum Ethernet header */
+    if (len > VNET_MAX_FRAME) return;
+
+    vnet.frames_tx++;
+
+    const uint8_t *dst_mac = frame;
+
+    /* Deliver to registered ports (except the sender) */
+    for (int i = 0; i < vnet.port_count; i++) {
+        if (i == src_port) continue;
+        vnet_port_t *port = &vnet.ports[i];
+        if (!port->active || !port->rx_fn) continue;
+
+        /* Deliver if broadcast/multicast or MAC matches */
+        if (is_broadcast(dst_mac) || (dst_mac[0] & 0x01) ||
+            mac_match(dst_mac, port->mac)) {
+            port->rx_fn(port->ctx, frame, len);
+        }
+    }
+
+    /* Forward to TAP (unless frame came from TAP) */
+    if (src_port >= 0) {
+        vnet_tap_tx(frame, len);
+    }
+
+    /* Forward to peers */
+    vnet_peers_tx(frame, len);
+}
+
+/* ========================================================================
+ * Peer Mesh
+ * ======================================================================== */
+
+static int peer_try_connect(const char *path) {
+    int fd = socket(AF_UNIX, SOCK_STREAM, 0);
+    if (fd < 0) return -1;
+
+    struct sockaddr_un addr;
+    memset(&addr, 0, sizeof(addr));
+    addr.sun_family = AF_UNIX;
+    strncpy(addr.sun_path, path, sizeof(addr.sun_path) - 1);
+
+    if (connect(fd, (struct sockaddr *)&addr, sizeof(addr)) < 0) {
+        close(fd);
+        return -1;
+    }
+
+    set_nonblock(fd);
+    return fd;
+}
+
+static int peer_create_listen(const char *path) {
+    unlink(path);
+
+    int fd = socket(AF_UNIX, SOCK_STREAM, 0);
+    if (fd < 0) return -1;
+
+    struct sockaddr_un addr;
+    memset(&addr, 0, sizeof(addr));
+    addr.sun_family = AF_UNIX;
+    strncpy(addr.sun_path, path, sizeof(addr.sun_path) - 1);
+
+    if (bind(fd, (struct sockaddr *)&addr, sizeof(addr)) < 0) {
+        close(fd);
+        return -1;
+    }
+
+    if (listen(fd, 1) < 0) {
+        close(fd);
+        unlink(path);
+        return -1;
+    }
+
+    set_nonblock(fd);
+    return fd;
+}
+
+int vnet_add_peer(const char *path) {
+    if (vnet.peer_count >= VNET_MAX_PEERS) {
+        fprintf(stderr, "[VNet] Maximum peers (%d) reached\n", VNET_MAX_PEERS);
+        return -1;
+    }
+
+    vnet_peer_t *p = &vnet.peers[vnet.peer_count++];
+    p->fd = -1;
+    p->listen_fd = -1;
+    p->rx_len = 0;
+    strncpy(p->path, path, sizeof(p->path) - 1);
+    p->path[sizeof(p->path) - 1] = '\0';
+
+    /* Try to connect first (peer already listening?) */
+    p->fd = peer_try_connect(path);
+    if (p->fd >= 0) {
+        fprintf(stderr, "[VNet] Peer %s: connected\n", path);
+        return 0;
+    }
+
+    /* Create server socket and wait */
+    p->listen_fd = peer_create_listen(path);
+    if (p->listen_fd < 0) {
+        fprintf(stderr, "[VNet] Peer %s: failed to create socket: %s\n",
+                path, strerror(errno));
+        vnet.peer_count--;
+        return -1;
+    }
+
+    fprintf(stderr, "[VNet] Peer %s: waiting for connection\n", path);
+    return 0;
+}
+
+/* ========================================================================
+ * Polling
+ * ======================================================================== */
+
+/* Process received peer data: extract length-prefixed frames */
+static void peer_process_rx(vnet_peer_t *p) {
+    while (p->rx_len >= 4) {
+        /* Read 4-byte LE length */
+        uint32_t frame_len = (uint32_t)p->rx_buf[0] |
+                             ((uint32_t)p->rx_buf[1] << 8) |
+                             ((uint32_t)p->rx_buf[2] << 16) |
+                             ((uint32_t)p->rx_buf[3] << 24);
+
+        if (frame_len > VNET_MAX_FRAME) {
+            fprintf(stderr, "[VNet] Peer %s: oversized frame (%u bytes)\n",
+                    p->path, frame_len);
+            p->rx_len = 0;
+            return;
+        }
+
+        if ((uint32_t)p->rx_len < 4 + frame_len) {
+            return;  /* Incomplete frame, wait for more data */
+        }
+
+        /* Deliver frame to all ports (src_port = -1 means "from peer") */
+        vnet.frames_peer_rx++;
+        vnet.frames_rx++;
+
+        /* Deliver to registered ports */
+        const uint8_t *frame = p->rx_buf + 4;
+        const uint8_t *dst_mac = frame;
+        for (int i = 0; i < vnet.port_count; i++) {
+            vnet_port_t *port = &vnet.ports[i];
+            if (!port->active || !port->rx_fn) continue;
+            if (is_broadcast(dst_mac) || (dst_mac[0] & 0x01) ||
+                mac_match(dst_mac, port->mac)) {
+                port->rx_fn(port->ctx, frame, (int)frame_len);
+            }
+        }
+
+        /* Also forward to TAP */
+        vnet_tap_tx(frame, (int)frame_len);
+
+        /* Consume this frame from the buffer */
+        size_t total = 4 + frame_len;
+        if ((size_t)p->rx_len > total) {
+            memmove(p->rx_buf, p->rx_buf + total, (size_t)p->rx_len - total);
+        }
+        p->rx_len -= (int)total;
+    }
+}
+
+static void vnet_poll_peers(void) {
+    for (int i = 0; i < vnet.peer_count; i++) {
+        vnet_peer_t *p = &vnet.peers[i];
+
+        /* Accept pending connections */
+        if (p->listen_fd >= 0 && p->fd < 0) {
+            int cfd = accept(p->listen_fd, NULL, NULL);
+            if (cfd >= 0) {
+                set_nonblock(cfd);
+                p->fd = cfd;
+                p->rx_len = 0;
+                fprintf(stderr, "[VNet] Peer %s: connected\n", p->path);
+            }
+        }
+
+        /* Read data from connected peer */
+        if (p->fd >= 0) {
+            struct pollfd pfd = { .fd = p->fd, .events = POLLIN };
+            if (poll(&pfd, 1, 0) > 0 && (pfd.revents & POLLIN)) {
+                int space = (int)sizeof(p->rx_buf) - p->rx_len;
+                if (space > 0) {
+                    ssize_t n = read(p->fd, p->rx_buf + p->rx_len, (size_t)space);
+                    if (n > 0) {
+                        p->rx_len += (int)n;
+                        peer_process_rx(p);
+                    } else if (n == 0) {
+                        fprintf(stderr, "[VNet] Peer %s: disconnected\n", p->path);
+                        close(p->fd);
+                        p->fd = -1;
+                        p->rx_len = 0;
+                    } else if (errno != EAGAIN && errno != EWOULDBLOCK) {
+                        fprintf(stderr, "[VNet] Peer %s: read error: %s\n",
+                                p->path, strerror(errno));
+                        close(p->fd);
+                        p->fd = -1;
+                        p->rx_len = 0;
+                    }
+                }
+            }
+
+            /* Check for peer errors */
+            if (p->fd >= 0) {
+                struct pollfd pfd2 = { .fd = p->fd, .events = 0 };
+                if (poll(&pfd2, 1, 0) > 0 &&
+                    (pfd2.revents & (POLLERR | POLLHUP | POLLNVAL))) {
+                    fprintf(stderr, "[VNet] Peer %s: connection error\n", p->path);
+                    close(p->fd);
+                    p->fd = -1;
+                    p->rx_len = 0;
+                }
+            }
+        }
+
+        /* Try reconnecting if disconnected and we were a client */
+        if (p->fd < 0 && p->listen_fd < 0) {
+            p->fd = peer_try_connect(p->path);
+            if (p->fd >= 0) {
+                p->rx_len = 0;
+                fprintf(stderr, "[VNet] Peer %s: reconnected\n", p->path);
+            }
+        }
+    }
+}
+
+static void vnet_poll_tap(void) {
+    if (vnet.tap_fd < 0) return;
+
+    /* Read frames from TAP (host → emulated devices) */
+    uint8_t frame[VNET_MAX_FRAME];
+    int n;
+    /* Drain up to 16 frames per poll cycle to avoid starvation */
+    for (int burst = 0; burst < 16; burst++) {
+        n = tapif_read(vnet.tap_fd, frame, sizeof(frame));
+        if (n <= 0) break;
+        if (n < 14) continue;  /* Too small for Ethernet header */
+
+        vnet.frames_rx++;
+
+        const uint8_t *dst_mac = frame;
+
+        /* Deliver to all registered ports */
+        for (int i = 0; i < vnet.port_count; i++) {
+            vnet_port_t *port = &vnet.ports[i];
+            if (!port->active || !port->rx_fn) continue;
+            if (is_broadcast(dst_mac) || (dst_mac[0] & 0x01) ||
+                mac_match(dst_mac, port->mac)) {
+                port->rx_fn(port->ctx, frame, n);
+            }
+        }
+
+        /* Forward to peers */
+        vnet_peers_tx(frame, n);
+    }
+}
+
+void vnet_poll(void) {
+    if (!vnet.enabled) return;
+    vnet_poll_tap();
+    vnet_poll_peers();
+}
+
+/* ========================================================================
+ * Statistics
+ * ======================================================================== */
+
+void vnet_report_stats(void) {
+    fprintf(stderr, "[VNet] Frames: TX=%u RX=%u Peer-TX=%u Peer-RX=%u\n",
+            vnet.frames_tx, vnet.frames_rx,
+            vnet.frames_peer_tx, vnet.frames_peer_rx);
+    fprintf(stderr, "[VNet] Ports: %d, Peers: %d, TAP: %s\n",
+            vnet.port_count, vnet.peer_count,
+            vnet.tap_fd >= 0 ? vnet.tap_name : "none");
+}
