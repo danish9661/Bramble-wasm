@@ -1,0 +1,309 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Bramble WASM - RP2350 Emulator</title>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body { font-family: 'Courier New', monospace; background: #1a1a2e; color: #e0e0e0; display: flex; flex-direction: column; height: 100vh; }
+  header { background: #16213e; padding: 10px 20px; display: flex; align-items: center; gap: 15px; border-bottom: 2px solid #0f3460; }
+  header h1 { font-size: 18px; color: #e94560; }
+  .status { font-size: 12px; color: #53a8b6; }
+  .main { display: flex; flex: 1; overflow: hidden; }
+  .sidebar { width: 280px; background: #16213e; border-right: 1px solid #0f3460; padding: 15px; display: flex; flex-direction: column; gap: 12px; overflow-y: auto; }
+  .panel { background: #1a1a2e; border: 1px solid #0f3460; border-radius: 6px; padding: 10px; }
+  .panel h3 { font-size: 11px; text-transform: uppercase; color: #e94560; margin-bottom: 8px; letter-spacing: 1px; }
+  .btn { background: #0f3460; color: #e0e0e0; border: 1px solid #53a8b6; padding: 6px 14px; border-radius: 4px; cursor: pointer; font-family: inherit; font-size: 12px; }
+  .btn:hover { background: #53a8b6; color: #1a1a2e; }
+  .btn:disabled { opacity: 0.4; cursor: not-allowed; }
+  .btn-row { display: flex; gap: 6px; flex-wrap: wrap; }
+  .gpio-grid { display: grid; grid-template-columns: repeat(8, 1fr); gap: 3px; }
+  .gpio-pin { width: 100%; aspect-ratio: 1; border-radius: 3px; background: #0a0a1a; border: 1px solid #333; display: flex; align-items: center; justify-content: center; font-size: 8px; }
+  .gpio-pin.high { background: #e94560; border-color: #e94560; }
+  .gpio-pin.low { background: #0a0a1a; }
+  .console-area { flex: 1; display: flex; flex-direction: column; overflow: hidden; }
+  .console-header { background: #16213e; padding: 8px 15px; border-bottom: 1px solid #0f3460; display: flex; justify-content: space-between; align-items: center; }
+  .console-header h3 { font-size: 11px; text-transform: uppercase; color: #e94560; letter-spacing: 1px; }
+  #serial-output { flex: 1; background: #0a0a1a; padding: 10px 15px; overflow-y: auto; font-size: 13px; line-height: 1.5; white-space: pre-wrap; word-break: break-all; }
+  .drop-zone { border: 2px dashed #53a8b6; border-radius: 8px; padding: 20px; text-align: center; color: #53a8b6; font-size: 12px; cursor: pointer; transition: all 0.2s; }
+  .drop-zone:hover, .drop-zone.dragover { background: rgba(83,168,182,0.1); border-color: #e94560; }
+  .info-row { display: flex; justify-content: space-between; font-size: 11px; margin-top: 4px; }
+  .info-val { color: #53a8b6; }
+  .perf { font-size: 10px; color: #666; margin-top: 5px; }
+</style>
+</head>
+<body>
+
+<header>
+  <h1>Bramble WASM</h1>
+  <span class="status" id="status">Loading...</span>
+  <span class="status" id="perf-info"></span>
+</header>
+
+<div class="main">
+  <div class="sidebar">
+    <div class="panel">
+      <h3>Firmware</h3>
+      <div class="drop-zone" id="drop-zone">
+        Drop UF2 or ELF here<br>or click to select
+        <input type="file" id="file-input" accept=".uf2,.elf,.bin" style="display:none">
+      </div>
+      <div class="info-row"><span>File:</span><span class="info-val" id="fw-name">none</span></div>
+    </div>
+
+    <div class="panel">
+      <h3>Controls</h3>
+      <div class="btn-row">
+        <button class="btn" id="btn-run">Run</button>
+        <button class="btn" id="btn-pause">Pause</button>
+        <button class="btn" id="btn-reset">Reset</button>
+      </div>
+      <div style="margin-top:8px">
+        <label style="font-size:11px">Clock: </label>
+        <select id="clock-select" style="background:#0a0a1a;color:#e0e0e0;border:1px solid #0f3460;padding:2px 4px;font-size:11px">
+          <option value="1">1 MHz</option>
+          <option value="12">12 MHz</option>
+          <option value="50">50 MHz</option>
+          <option value="125" selected>125 MHz</option>
+          <option value="150">150 MHz</option>
+          <option value="250">250 MHz</option>
+        </select>
+      </div>
+    </div>
+
+    <div class="panel">
+      <h3>Core State</h3>
+      <div class="info-row"><span>PC:</span><span class="info-val" id="core-pc">0x00000000</span></div>
+      <div class="info-row"><span>SP:</span><span class="info-val" id="core-sp">0x00000000</span></div>
+      <div class="info-row"><span>Status:</span><span class="info-val" id="core-status">idle</span></div>
+      <div class="info-row"><span>MIPS:</span><span class="info-val" id="core-mips">0</span></div>
+    </div>
+
+    <div class="panel">
+      <h3>GPIO (0-15)</h3>
+      <div class="gpio-grid" id="gpio-low"></div>
+    </div>
+    <div class="panel">
+      <h3>GPIO (16-29)</h3>
+      <div class="gpio-grid" id="gpio-high"></div>
+    </div>
+
+    <div class="panel">
+      <h3>UART Input</h3>
+      <div style="display:flex;gap:4px">
+        <input type="text" id="uart-input" placeholder="Type to send..." 
+               style="flex:1;background:#0a0a1a;color:#e0e0e0;border:1px solid #0f3460;padding:4px 8px;font-size:12px;font-family:inherit">
+        <button class="btn" id="btn-send">Send</button>
+      </div>
+    </div>
+
+    <div class="panel">
+      <h3>Memory</h3>
+      <div class="btn-row">
+        <input type="text" id="mem-addr" placeholder="0x10000000" 
+               style="width:100px;background:#0a0a1a;color:#e0e0e0;border:1px solid #0f3460;padding:4px;font-size:11px;font-family:inherit">
+        <button class="btn" id="btn-read-mem">Read32</button>
+        <span class="info-val" id="mem-val" style="font-size:11px;line-height:28px">-</span>
+      </div>
+    </div>
+  </div>
+
+  <div class="console-area">
+    <div class="console-header">
+      <h3>Serial Output (UART0)</h3>
+      <button class="btn" id="btn-clear" style="padding:3px 8px;font-size:10px">Clear</button>
+    </div>
+    <div id="serial-output"></div>
+  </div>
+</div>
+
+<script type="module">
+import BrambleModule from './bramble.wasm.js';
+
+let mod = null;
+let running = false;
+let rafId = null;
+const CYCLES_PER_FRAME = 2_500_000;
+let lastFrameTime = 0;
+let totalInstructions = 0;
+let uartText = '';
+
+const $ = id => document.getElementById(id);
+const serialEl = $('serial-output');
+
+function appendSerial(ch) {
+  uartText += ch;
+  if (uartText.length > 10000) uartText = uartText.slice(-8000);
+  serialEl.textContent = uartText;
+  serialEl.scrollTop = serialEl.scrollHeight;
+}
+
+function updateGpio() {
+  const lo = $('gpio-low');
+  const hi = $('gpio-high');
+  if (!lo.children.length) {
+    for (let i = 0; i < 16; i++) lo.innerHTML += `<div class="gpio-pin" id="gpio-${i}">${i}</div>`;
+    for (let i = 16; i < 30; i++) hi.innerHTML += `<div class="gpio-pin" id="gpio-${i}">${i}</div>`;
+  }
+  for (let i = 0; i < 30; i++) {
+    const val = mod._bramble_get_gpio(i);
+    const el = $(`gpio-${i}`);
+    if (el) el.className = 'gpio-pin ' + (val ? 'high' : 'low');
+  }
+}
+
+function updateCoreState() {
+  const pcBuf = mod._malloc(4);
+  const spBuf = mod._malloc(4);
+  mod._bramble_get_core_state(0, pcBuf, spBuf);
+  const pc = mod.HEAPU32[pcBuf >> 2];
+  const sp = mod.HEAPU32[spBuf >> 2];
+  mod._free(pcBuf);
+  mod._free(spBuf);
+  $('core-pc').textContent = '0x' + pc.toString(16).padStart(8, '0');
+  $('core-sp').textContent = '0x' + sp.toString(16).padStart(8, '0');
+  $('core-status').textContent = mod._bramble_is_halted() ? 'halted' : 'running';
+}
+
+function frame() {
+  if (!running) return;
+
+  const now = performance.now();
+  const elapsed = now - lastFrameTime;
+  if (elapsed > 16) {
+    const steps = mod._bramble_step(CYCLES_PER_FRAME);
+    totalInstructions += steps;
+
+    let ch;
+    while ((ch = mod._bramble_read_uart(0)) !== -1) {
+      appendSerial(String.fromCharCode(ch));
+    }
+
+    updateCoreState();
+    updateGpio();
+
+    const mips = elapsed > 0 ? ((totalInstructions / elapsed) * 1000 / 1e6).toFixed(1) : 0;
+    $('core-mips').textContent = mips;
+    $('perf-info').textContent = `${mips} MIPS | ${(totalInstructions/1e6).toFixed(1)}M total`;
+
+    lastFrameTime = now;
+  }
+
+  rafId = requestAnimationFrame(frame);
+}
+
+$('btn-run').onclick = () => {
+  if (!mod) return;
+  running = true;
+  lastFrameTime = performance.now();
+  frame();
+  $('status').textContent = 'Running';
+};
+
+$('btn-pause').onclick = () => {
+  running = false;
+  if (rafId) cancelAnimationFrame(rafId);
+  $('status').textContent = 'Paused';
+};
+
+$('btn-reset').onclick = () => {
+  if (!mod) return;
+  running = false;
+  if (rafId) cancelAnimationFrame(rafId);
+  mod._bramble_reset();
+  uartText = '';
+  serialEl.textContent = '';
+  totalInstructions = 0;
+  updateCoreState();
+  $('status').textContent = 'Reset';
+};
+
+$('clock-select').onchange = (e) => {
+  if (!mod) return;
+  mod._bramble_set_clock(parseInt(e.target.value));
+};
+
+$('btn-clear').onclick = () => { uartText = ''; serialEl.textContent = ''; };
+
+$('btn-send').onclick = () => {
+  if (!mod) return;
+  const text = $('uart-input').value;
+  for (const ch of text) mod._bramble_write_uart(ch.charCodeAt(0));
+  $('uart-input').value = '';
+};
+
+$('uart-input').onkeydown = (e) => {
+  if (e.key === 'Enter') $('btn-send').click();
+};
+
+$('btn-read-mem').onclick = () => {
+  if (!mod) return;
+  const addr = parseInt($('mem-addr').value, 16);
+  if (isNaN(addr)) return;
+  const val = mod._bramble_mem_read32(addr);
+  $('mem-val').textContent = '0x' + (val >>> 0).toString(16).padStart(8, '0');
+};
+
+async function loadFirmware(data, name) {
+  if (!mod) return;
+  running = false;
+  if (rafId) cancelAnimationFrame(rafId);
+
+  mod._bramble_reset();
+  uartText = '';
+  serialEl.textContent = '';
+  totalInstructions = 0;
+  $('fw-name').textContent = name;
+
+  const ptr = mod._malloc(data.length);
+  mod.HEAPU8.set(data, ptr);
+
+  let blocks;
+  if (name.endsWith('.uf2')) {
+    blocks = mod._bramble_load_uf2(ptr, data.length);
+    $('status').textContent = `Loaded UF2 (${blocks} blocks)`;
+  } else {
+    blocks = mod._bramble_load_elf(ptr, data.length);
+    $('status').textContent = blocks ? 'Loaded ELF' : 'ELF load failed';
+  }
+  mod._free(ptr);
+
+  $('status').textContent += ` - ${name}`;
+  updateCoreState();
+}
+
+const dropZone = $('drop-zone');
+const fileInput = $('file-input');
+
+dropZone.onclick = () => fileInput.click();
+dropZone.ondragover = (e) => { e.preventDefault(); dropZone.classList.add('dragover'); };
+dropZone.ondragleave = () => dropZone.classList.remove('dragover');
+dropZone.ondrop = (e) => {
+  e.preventDefault();
+  dropZone.classList.remove('dragover');
+  const file = e.dataTransfer.files[0];
+  if (file) file.arrayBuffer().then(buf => loadFirmware(new Uint8Array(buf), file.name));
+};
+fileInput.onchange = (e) => {
+  const file = e.target.files[0];
+  if (file) file.arrayBuffer().then(buf => loadFirmware(new Uint8Array(buf), file.name));
+};
+
+$('status').textContent = 'Initializing WASM...';
+
+try {
+  mod = await BrambleModule();
+  mod._bramble_init(2);
+  mod._bramble_set_clock(125);
+  $('status').textContent = 'Ready - drop a UF2 file to begin';
+  $('btn-run').disabled = false;
+  $('btn-pause').disabled = false;
+  $('btn-reset').disabled = false;
+} catch (err) {
+  $('status').textContent = 'Error: ' + err.message;
+  console.error(err);
+}
+</script>
+</body>
+</html>

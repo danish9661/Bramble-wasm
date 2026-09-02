@@ -25,6 +25,7 @@
 #include "rp2350_rv/rv_bootrom.h"
 #include "rp2350_rv/rp2350_periph.h"
 #include "rp2350_rv/rv_icache.h"
+#include "rp2350_rv/rp2350_memmap.h"
 #include "rp2350_rv/picobin.h"
 #include "rp2350_arm/m33_cpu.h"
 
@@ -172,7 +173,7 @@ int bramble_load_elf(const uint8_t *data, int len) {
     (void)e_entry;
 
     for (int i = 0; i < ph_num; i++) {
-        uint8_t *ph = data + ph_offset + i * ph_size;
+        const uint8_t *ph = data + ph_offset + i * ph_size;
         uint32_t p_type = *(uint32_t *)ph;
         if (p_type == 1) {
             uint32_t p_offset = *(uint32_t *)(ph + 4);
@@ -332,3 +333,15 @@ uint8_t *bramble_get_flash_ptr(void) {
 uint8_t *bramble_get_sram_ptr(void) {
     return rv_bus.sram;
 }
+
+/* Stubs for excluded files (netbridge.c, wire.c, corepool.c) */
+int net_bridge_uart_active(int uart_num) { (void)uart_num; return 0; }
+void net_bridge_uart_tx(int uart_num, uint8_t byte) { (void)uart_num; (void)byte; }
+int wire_uart_active(int uart_num) { (void)uart_num; return 0; }
+void wire_send_uart(int uart_num, uint8_t byte) { (void)uart_num; (void)byte; }
+void corepool_start_core_thread(int core_id) { (void)core_id; }
+void corepool_wake_cores(void) {}
+int tapif_open(const char *name) { (void)name; return -1; }
+void tapif_close(int fd) { (void)fd; }
+int tapif_read(int fd, uint8_t *buf, int maxlen) { (void)fd; (void)buf; (void)maxlen; return 0; }
+int tapif_write(int fd, const uint8_t *buf, int len) { (void)fd; (void)buf; (void)len; return len; }
