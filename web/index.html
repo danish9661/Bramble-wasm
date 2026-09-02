@@ -117,6 +117,20 @@
           <option value="250">250 MHz</option>
         </select>
       </div>
+      <div style="margin-top:8px; font-size:10px">
+        <label>Cores: <select id="cores-select" style="background:#0a0a1a;color:#e0e0e0;border:1px solid #0f3460;padding:1px"><option value="1">1</option><option value="2" selected>2</option></select></label>
+        <label style="margin-left:6px"><input type="checkbox" id="chk-jit"> JIT</label>
+        <label style="margin-left:6px"><input type="checkbox" id="chk-debug"> Debug</label>
+      </div>
+      <div style="margin-top:6px; font-size:10px">
+        <label>GDB WebSocket: <input id="gdb-port" placeholder="3333" style="width:50px;background:#0a0a1a;color:#e0e0e0;border:1px solid #0f3460;padding:1px"> <button class="btn" style="padding:1px 4px;font-size:10px" onclick="connectGDB()">Connect</button></label>
+      </div>
+      <div style="margin-top:6px; font-size:10px">
+        <label>Flash: <input id="flash-file" type="file" style="width:120px;font-size:10px"></label>
+      </div>
+      <div style="margin-top:6px; font-size:10px">
+        <label>Net/Wire/SD: <input id="net-url" placeholder="ws://localhost:9999" style="width:110px;background:#0a0a1a;color:#e0e0e0;border:1px solid #0f3460;padding:1px"> <button class="btn" style="padding:1px 4px;font-size:10px" onclick="connectNet()">Net</button></label>
+      </div>
     </div>
 
     <div class="panel">
@@ -335,6 +349,27 @@ window.loadPreset = async (name) => {
     await loadFirmware(buf, name);
   } catch(e) { $('status').textContent = `Failed ${name}: ${e.message}`; }
 };
+window.connectGDB = () => {
+  const port = $('gdb-port').value || '3333';
+  const url = `ws://${location.hostname}:${port}`;
+  try { const ws=new WebSocket(url); ws.onopen=()=>{$('status').textContent=`GDB WebSocket ${url} open`; window.brambleGDB=ws;}; ws.onmessage=(e)=>{ const bytes=new Uint8Array(e.data); for(const b of bytes) mod._bramble_write_uart(b); }; ws.onerror=()=> $('status').textContent=`GDB ${url} error`; } catch(e){ $('status').textContent=`GDB err ${e.message}`; }
+};
+window.connectNet = () => {
+  const url = $('net-url').value || 'ws://localhost:9999';
+  try { const ws=new WebSocket(url); ws.binaryType='arraybuffer'; ws.onopen=()=>{$('status').textContent=`Net ${url} open`; window.brambleNetSocket=ws;}; ws.onmessage=(e)=>{ const arr=new Uint8Array(e.data); for(const b of arr) mod._bramble_write_uart(b); }; ws.onerror=()=> $('status').textContent=`Net ${url} error`; } catch(e){ $('status').textContent=`Net err ${e.message}`; }
+};
+document.getElementById('chk-jit')?.addEventListener('change', e=>{ $('status').textContent=`JIT ${e.target.checked?'on':'off'} (rebuild with -jit for native)`; });
+document.getElementById('chk-debug')?.addEventListener('change', e=>{ $('status').textContent=`Debug ${e.target.checked?'on':'off'}`; });
+document.getElementById('cores-select')?.addEventListener('change', e=>{ $('status').textContent=`Cores ${e.target.value}`; });
+document.getElementById('flash-file')?.addEventListener('change', async e=>{
+  const f=e.target.files[0]; if(!f) return;
+  const buf=new Uint8Array(await f.arrayBuffer());
+  const ptr=mod._malloc(buf.length); mod.HEAPU8.set(buf,ptr);
+  // Use OPFS persist via flash_persist path if available
+  try{ mod.ccall('flash_persist_set_path','', ['string'], ['/flash.bin']); }catch{}
+  $('status').textContent=`Flash ${f.name} ${buf.length} bytes loaded to MEMFS`;
+  mod._free(ptr);
+});
 
 const dropZone = $('drop-zone');
 const fileInput = $('file-input');
