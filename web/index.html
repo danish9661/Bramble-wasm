@@ -250,7 +250,11 @@ async function loadFirmware(data, name) {
   running = false;
   if (rafId) cancelAnimationFrame(rafId);
 
-  mod._bramble_reset();
+  // Auto-detect arch from filename
+  const isRV = /riscv|rv32|pico2_riscv/i.test(name);
+  mod._bramble_init(isRV ? 1 : 0);
+  mod._bramble_set_clock(parseInt($('clock-select').value));
+
   uartText = '';
   serialEl.textContent = '';
   totalInstructions = 0;
@@ -268,6 +272,7 @@ async function loadFirmware(data, name) {
     $('status').textContent = blocks ? 'Loaded ELF' : 'ELF load failed';
   }
   mod._free(ptr);
+  mod._bramble_reset();
 
   $('status').textContent += ` - ${name}`;
   updateCoreState();
@@ -294,7 +299,7 @@ $('status').textContent = 'Initializing WASM...';
 
 try {
   mod = await BrambleModule();
-  mod._bramble_init(2);
+  mod._bramble_init(0);
   mod._bramble_set_clock(125);
   $('status').textContent = 'Ready - drop a UF2 file to begin';
   $('btn-run').disabled = false;

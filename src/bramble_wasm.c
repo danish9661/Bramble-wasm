@@ -28,6 +28,8 @@
 #include "rp2350_rv/rp2350_memmap.h"
 #include "rp2350_rv/picobin.h"
 #include "rp2350_arm/m33_cpu.h"
+#include <pthread.h>
+pthread_mutex_t fuse_flash_mutex = PTHREAD_MUTEX_INITIALIZER;
 
 /* UF2 block structure (copied from uf2.c) */
 typedef struct {
@@ -52,6 +54,7 @@ typedef enum { ARCH_M0PLUS, ARCH_RV32, ARCH_M33 } arch_t;
 static rv_cpu_state_t rv_cores[2];
 static rv_membus_state_t rv_bus;
 static rv_icache_t rv_icache;
+static int current_arch = 1;
 
 /* UART TX buffer: firmware → browser */
 #define UART_TX_BUF_SIZE 4096
@@ -93,6 +96,7 @@ int __attribute__((used)) putchar(int c) {
 }
 
 int bramble_init(int arch) {
+    current_arch = arch;
     cpu_init();
     memset(cpu.flash, 0xFF, FLASH_SIZE_MAX);
     timing_set_clock_mhz(1);
@@ -104,7 +108,7 @@ int bramble_init(int arch) {
 
     if (arch == ARCH_RV32) {
         membus_rp2350_mode = 1;
-        rv_membus_init(&rv_bus, cpu.flash, FLASH_SIZE, timing_config.cycles_per_us);
+        rv_membus_init(&rv_bus, cpu.flash, FLASH_SIZE_MAX, timing_config.cycles_per_us);
         rv_bootrom_init(rv_bus.rom, rv_bus.rom_size, RP2350_FLASH_BASE, RP2350_SRAM_END);
         rv_icache_init(&rv_icache);
         rv_cpu_init(&rv_cores[0], 0);
@@ -116,6 +120,9 @@ int bramble_init(int arch) {
         gdb_is_riscv = 1;
         gdb_rv_harts[0] = &rv_cores[0];
         gdb_rv_harts[1] = &rv_cores[1];
+    } else {
+        membus_rp2350_mode = (arch == ARCH_M33) ? 1 : 0;
+        gdb_is_riscv = 0;
     }
 
     uart_tx_head = 0;
@@ -127,76 +134,37 @@ int bramble_init(int arch) {
 }
 
 int bramble_load_uf2(const uint8_t *data, int len) {
-    if (len < 512) return 0;
-    int blocks_loaded = 0;
-    int offset = 0;
-    uint32_t family_id = 0;
-
-    while (offset + 512 <= len) {
-        uf2_block_t *block = (uf2_block_t *)(data + offset);
-        if (block->magic_start0 != UF2_MAGIC_START0 || block->magic_start1 != UF2_MAGIC_START1)
-            break;
-        if (block->magic_end != UF2_MAGIC_END)
-            break;
-        if (block->payload_size > 476) break;
-        if (block->target_addr < FLASH_BASE) break;
-
-        uint32_t flash_offset = block->target_addr - FLASH_BASE;
-        if (flash_offset + block->payload_size > FLASH_SIZE_MAX) break;
-
-        memcpy(cpu.flash + flash_offset, block->data, block->payload_size);
-        blocks_loaded++;
-        offset += 512;
-
-        if (block->flags & 0x2000)
-            family_id = block->file_size;
-    }
-
-    if (blocks_loaded == 0) return 0;
-    if (family_id == UF2_FAMILY_RP2350_RV)
-        membus_rp2350_mode = 1;
-
-    return blocks_loaded;
+    FILE *f = fopen("/tmp/fw.uf2", "wb");
+    if (!f) return 0;
+    fwrite(data, 1, len, f);
+    fclose(f);
+    int ret = load_uf2("/tmp/fw.uf2");
+    // load_uf2 sets detected_arch and flash; sync membus mode if RP2350
+    if (loader_detected_arch() == FW_ARCH_RV32) membus_rp2350_mode = 1;
+    return ret;
 }
 
 int bramble_load_elf(const uint8_t *data, int len) {
-    if (len < 52) return 0;
-    if (*(uint32_t *)data != 0x464C457F) return 0;
-
-    uint16_t e_type = *(uint16_t *)(data + 16);
-    uint32_t e_entry = *(uint32_t *)(data + 24);
-    int ph_offset = *(int32_t *)(data + 28);
-    int ph_num = *(uint16_t *)(data + 44);
-    int ph_size = *(uint16_t *)(data + 42);
-
-    (void)e_type;
-    (void)e_entry;
-
-    for (int i = 0; i < ph_num; i++) {
-        const uint8_t *ph = data + ph_offset + i * ph_size;
-        uint32_t p_type = *(uint32_t *)ph;
-        if (p_type == 1) {
-            uint32_t p_offset = *(uint32_t *)(ph + 4);
-            uint32_t vaddr = *(uint32_t *)(ph + 8);
-            uint32_t fsize = *(uint32_t *)(ph + 16);
-            if (vaddr >= FLASH_BASE && vaddr - FLASH_BASE + fsize <= FLASH_SIZE_MAX) {
-                if (p_offset + fsize <= (uint32_t)len)
-                    memcpy(cpu.flash + (vaddr - FLASH_BASE), data + p_offset, fsize);
-            }
-        }
-    }
-    return 1;
+    FILE *f = fopen("/tmp/fw.elf", "wb");
+    if (!f) return 0;
+    fwrite(data, 1, len, f);
+    fclose(f);
+    return load_elf("/tmp/fw.elf");
 }
 
 void bramble_reset(void) {
-    cpu_reset_core(CORE0);
-    rv_cpu_reset(&rv_cores[0], 0x00000000);
-    rv_cpu_reset(&rv_cores[1], 0x00000000);
-    rv_cores[1].is_halted = 1;
-    rv_cores[0].bus = &rv_bus;
-    rv_cores[1].bus = &rv_bus;
-    rv_cores[0].icache = &rv_icache;
-    rv_cores[1].icache = &rv_icache;
+    if (current_arch == ARCH_RV32) {
+        rv_cpu_reset(&rv_cores[0], 0x00000000);
+        rv_cpu_reset(&rv_cores[1], 0x00000000);
+        rv_cores[1].is_halted = 1;
+        rv_cores[0].bus = &rv_bus;
+        rv_cores[1].bus = &rv_bus;
+        rv_cores[0].icache = &rv_icache;
+        rv_cores[1].icache = &rv_icache;
+    } else {
+        cpu_reset_core(CORE0);
+        cpu_reset_core(CORE1);
+    }
 }
 
 void bramble_set_clock(int freq_mhz) {
@@ -261,68 +229,81 @@ int bramble_step(int n_instructions) {
     if (timing_config.cycles_per_us == 0)
         timing_set_clock_mhz(1);
 
-    int total = 0;
-    while (total < n_instructions) {
-        if (rv_cpu_is_halted(&rv_cores[0]))
-            break;
-
-        if (!rv_cores[0].is_wfi) {
-            if (!rv_rom_intercept(&rv_cores[0])) {
-                rv_cpu_step(&rv_cores[0]);
-                total++;
+    if (current_arch == ARCH_RV32) {
+        int total = 0;
+        while (total < n_instructions) {
+            if (rv_cpu_is_halted(&rv_cores[0]))
+                break;
+            if (!rv_cores[0].is_wfi) {
+                if (!rv_rom_intercept(&rv_cores[0])) {
+                    rv_cpu_step(&rv_cores[0]);
+                    total++;
+                }
             }
-        }
-
-        if (!rv_cores[1].is_halted && !rv_cores[1].is_wfi) {
-            if (!rv_rom_intercept(&rv_cores[1]))
-                rv_cpu_step(&rv_cores[1]);
-        }
-
-        rv_clint_tick(&rv_bus.clint, 1);
-        if (rv_bus.clint.cycle_accum == 0) {
-            timer_tick(1);
-            rp2350_timer1_tick(&rv_bus.periph, 1);
-        }
-
-        rv_clint_check_interrupts(&rv_bus.clint, &rv_cores[0]);
-        if (!rv_cores[1].is_halted)
-            rv_clint_check_interrupts(&rv_bus.clint, &rv_cores[1]);
-
-        if (rv_cores[1].is_halted) {
-            uint32_t h1_entry, h1_sp, h1_arg;
-            if (rv_membus_check_hart1_launch(&rv_bus, &h1_entry, &h1_sp, &h1_arg)) {
-                rv_cpu_reset(&rv_cores[1], h1_entry);
-                rv_cores[1].x[2] = h1_sp;
-                rv_cores[1].x[10] = h1_arg;
+            if (!rv_cores[1].is_halted && !rv_cores[1].is_wfi) {
+                if (!rv_rom_intercept(&rv_cores[1]))
+                    rv_cpu_step(&rv_cores[1]);
             }
+            rv_clint_tick(&rv_bus.clint, 1);
+            if (rv_bus.clint.cycle_accum == 0) {
+                timer_tick(1);
+                rp2350_timer1_tick(&rv_bus.periph, 1);
+            }
+            rv_clint_check_interrupts(&rv_bus.clint, &rv_cores[0]);
+            if (!rv_cores[1].is_halted)
+                rv_clint_check_interrupts(&rv_bus.clint, &rv_cores[1]);
+            if (rv_cores[1].is_halted) {
+                uint32_t h1_entry, h1_sp, h1_arg;
+                if (rv_membus_check_hart1_launch(&rv_bus, &h1_entry, &h1_sp, &h1_arg)) {
+                    rv_cpu_reset(&rv_cores[1], h1_entry);
+                    rv_cores[1].x[2] = h1_sp;
+                    rv_cores[1].x[10] = h1_arg;
+                }
+            }
+            if ((total & 0x3FF) == 0)
+                feed_uart_rx();
+            if (rv_cores[0].csr[CSR_MCAUSE] == MCAUSE_BREAKPOINT && rv_cores[0].x[10] == 0x20026)
+                break;
+            if (total >= n_instructions)
+                break;
         }
-
-        if ((total & 0x3FF) == 0)
-            feed_uart_rx();
-
-        if (rv_cores[0].csr[CSR_MCAUSE] == MCAUSE_BREAKPOINT &&
-            rv_cores[0].x[10] == 0x20026)
-            break;
-
-        if (total >= n_instructions)
-            break;
+        feed_uart_rx();
+        return total;
+    } else {
+        int total = 0;
+        while (total < n_instructions) {
+            if (cpu_is_halted_core(0))
+                break;
+            cpu_step_core(0);
+            total++;
+            if (!cpu_is_halted_core(1))
+                cpu_step_core(1);
+            if ((total & 0x3FF) == 0) {
+                timer_tick(1024);
+                feed_uart_rx();
+            }
+            if (total >= n_instructions)
+                break;
+        }
+        feed_uart_rx();
+        return total;
     }
-
-    feed_uart_rx();
-    return total;
 }
 
 int bramble_is_halted(void) {
-    return rv_cpu_is_halted(&rv_cores[0]);
+    if (current_arch == ARCH_RV32)
+        return rv_cpu_is_halted(&rv_cores[0]);
+    return cpu_is_halted_core(0);
 }
 
 void bramble_get_core_state(int core, uint32_t *pc, uint32_t *sp) {
-    if (core == 0) {
-        *pc = rv_cores[0].pc;
-        *sp = rv_cores[0].x[2];
+    if (current_arch == ARCH_RV32) {
+        if (core == 0) { *pc = rv_cores[0].pc; *sp = rv_cores[0].x[2]; }
+        else { *pc = rv_cores[1].pc; *sp = rv_cores[1].x[2]; }
     } else {
-        *pc = rv_cores[1].pc;
-        *sp = rv_cores[1].x[2];
+        extern cpu_state_dual_t cores[2];
+        if (core == 0) { *pc = cores[0].r[15]; *sp = cores[0].r[13]; }
+        else { *pc = cores[1].r[15]; *sp = cores[1].r[13]; }
     }
 }
 

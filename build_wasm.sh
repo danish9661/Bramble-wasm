@@ -14,7 +14,7 @@ echo "Emscripten: $(emcc --version | head -1)"
 
 mkdir -p web
 
-COMMON_FLAGS="-O2 -Wall -Wno-macro-redefined -Wno-logical-not-parentheses -Wno-format"
+COMMON_FLAGS="-O3 -msimd128 -Wall -Wno-macro-redefined -Wno-logical-not-parentheses -Wno-format"
 INCLUDES="-Iinclude/ -Iinclude/rp2350_rv -Iinclude/rp2350_arm"
 
 SOURCES=(
@@ -54,12 +54,12 @@ emcc \
   -s MODULARIZE=1 \
   -s EXPORT_NAME="BrambleModule" \
   -s EXPORTED_FUNCTIONS="$EXPORTS" \
-  -s EXPORTED_RUNTIME_METHODS='["ccall","cwrap","getValue","setValue"]' \
+  -s EXPORTED_RUNTIME_METHODS='["ccall","cwrap","getValue","setValue","HEAPU8","HEAPU32","HEAP8"]' \
   -s INITIAL_MEMORY=67108864 \
   -s MAXIMUM_MEMORY=268435456 \
   -s STACK_SIZE=1048576 \
   -s NO_EXIT_RUNTIME=1 \
-  -s ENVIRONMENT='web' \
+  -s ENVIRONMENT='web,node' \
   -o web/bramble.wasm.js
 
 echo ""
