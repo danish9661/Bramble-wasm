@@ -99,6 +99,7 @@ jobs:
           sleep 1
           gdb -q -batch \
             -ex "set architecture arm" \
+            -ex "file web/hello_usb.elf" \
             -ex "target remote :13347" \
             -ex "break main" \
             -ex "continue" \
