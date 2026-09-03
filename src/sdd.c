@@ -118,7 +118,30 @@ int sdd_create_from_arg(const char *arg) {
         return sdd_create_thermometer(temp, i2c_bus, i2c_addr);
     }
 
+    if (strcmp(type, "eeprom") == 0) {
+        int i2c_bus = 0;
+        int i2c_addr = 0x50;
+        const char *file = NULL;
+
+        if (opts) {
+            char *saveptr = NULL;
+            char *token = strtok_r(opts, ",", &saveptr);
+            while (token) {
+                if (strncmp(token, "i2c=", 4) == 0) {
+                    i2c_bus = atoi(token + 4);
+                } else if (strncmp(token, "addr=", 5) == 0) {
+                    i2c_addr = (int)strtol(token + 5, NULL, 0);
+                } else if (strncmp(token, "file=", 5) == 0) {
+                    file = token + 5;
+                }
+                token = strtok_r(NULL, ",", &saveptr);
+            }
+        }
+
+        return sdd_create_eeprom(i2c_bus, i2c_addr, file);
+    }
+
     fprintf(stderr, "[SDD] Unknown device type: '%s'\n", type);
-    fprintf(stderr, "[SDD] Available types: thermometer\n");
+    fprintf(stderr, "[SDD] Available types: thermometer, eeprom\n");
     return -1;
 }

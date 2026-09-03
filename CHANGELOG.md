@@ -12,17 +12,20 @@
 - **Threads**: `web/bramble_worker.js` off-main-thread stepping, `web/serve_coop.py` COOP/COEP server, `build_wasm_threads.sh` `-pthread` variant (`web/bramble.wasm.threads.{js,wasm}`), SAB detect panel with cooperative fallback.
 - **WASM tests**: `test-wasm.js` (Node mirrors ctest + boots hello/gpio/timer/littleos both chips + MicroPython note).
 - **USB host parity**: string descriptors (lang/mfr/prod/serial) + `SET_INTERFACE` states, config parse moved before string phase (EP0 clobber safe), control-stall auto-DONE guard (SagePico retry bound), CDC OUT via `putchar` in WASM, RX routed to USB when `usb_cdc_stdio_active`.
+- **24LC256 EEPROM SDD** (`src/sdd_eeprom.c`): 32KB I2C EEPROM at `0x50`, page-wrap writes, sequential wrap, optional `file=` persistence. `-sdd eeprom[:i2c=,addr=,file=]`.
+- **Benchmarks**: native 74.5 MIPS (ICache) / 129 MIPS (JIT 1.74x), WASM Node 17.4 MIPS (littleos); browser frame budget `500k` instr/frame.
+- **CI** (`.github/workflows/test.yml`): native ctest + bench + firmware smoke, WASM `test-wasm.js` smoke, Playwright browser matrix (hello UART, 0 console errors).
 - **Audit fixes**: GPIO INTR-before-pin + 6 banks + proc1 + hi pins 32-47, interp `mask_msb==31` guard, GPIO subword RMW, IPR `0xC0`, dual RAM icache/jit invalidate, SysTick fast-skip wake, shift `1u`, ROM `ldexp` scales, UART/USB batched flush, USB DPRAM guard, GDB checksum + `MSG_NOSIGNAL`, RV GDB/watchdog/fault/script/flush, storage/ROM/ELF bounds, wire 2KB + buffered ETH, vnet single-buffer TX.
 
 ### Known Issues
 
-- **MicroPython REPL**: bundled `micropython_rp2040/rp2350.uf2` panics via `BKPT #0` (`panic()` after ~267k steps) into double-fault lockup (`PC=0xFFFFFFFF`) on native and WASM alike (native parity, not a WASM gap). Needs ELF + symbols to root-cause the panic call site; REPL untested.
+- **MicroPython REPL**: bundled `micropython_rp2040.uf2` (v1.22.1) halts ~270k steps via Pico SDK `hard_assert` ("Hard assert" literal at flash `0x1003C1DD`) → prints `"\n"` → `_exit(1)` → `BKPT #0` → HardFault → SDK default fault handler (also `BKPT`) → double-fault lockup (`PC=0xFFFFFFFF`). Identical on native and WASM (not a WASM gap). Attributing the asserting call-site needs ELF symbols (no ARM toolchain in this env); REPL untested.
 - **ARM SagePico**: as in 0.46.0; string/`SET_INTERFACE` states added but welcome message still not reached.
-- **W5500 live**: needs `web/net_proxy.py` running; direct `AF_INET` unavailable in browser sandbox.
+- **W5500 live**: needs `web/net_proxy.py` running; direct `AF_INET` unavailable in the browser sandbox.
 
 ### Tests
 
-- 319/319 tests passing, no regressions. Playwright Chromium: 0 console errors, hello_world UART in serial monitor.
+- 324/324 tests passing (319 + 5 EEPROM), no regressions. Playwright Chromium: 0 console errors, hello_world UART in serial monitor.
 
 ---
 

@@ -4167,6 +4167,112 @@ TEST(test_sdd_unknown_type) {
     PASS();
 }
 
+TEST(test_sdd_eeprom_create_erased) {
+    sdd_init();
+    int idx = sdd_create_eeprom(0, 0x50, NULL);
+    ASSERT_EQ(0, idx, "Create should return index 0");
+    ASSERT_EQ(1, sdd_registry.count, "Registry should have 1 device");
+    ASSERT_EQ(0x50, sdd_registry.devices[0].i2c_addr, "I2C addr should be 0x50");
+    sdd_device_t *dev = &sdd_registry.devices[0];
+    /* Fresh EEPROM reads erased 0xFF */
+    dev->i2c_stop(dev->ctx);  /* arm address phase */
+    dev->i2c_write(dev->ctx, 0x00);
+    dev->i2c_write(dev->ctx, 0x10);
+    dev->i2c_start(dev->ctx);  /* RESTART -> read mode */
+    ASSERT_EQ(0xFF, dev->i2c_read(dev->ctx), "Fresh EEPROM should read 0xFF");
+    dev->i2c_stop(dev->ctx);
+    sdd_cleanup();
+    PASS();
+}
+
+TEST(test_sdd_eeprom_byte_write_read) {
+    sdd_init();
+    sdd_create_eeprom(0, 0x50, NULL);
+    sdd_device_t *dev = &sdd_registry.devices[0];
+
+    /* Byte write 0xA5 to 0x0123 */
+    dev->i2c_stop(dev->ctx);
+    dev->i2c_write(dev->ctx, 0x01);
+    dev->i2c_write(dev->ctx, 0x23);
+    dev->i2c_write(dev->ctx, 0xA5);
+    dev->i2c_stop(dev->ctx);
+
+    /* Random read back */
+    dev->i2c_write(dev->ctx, 0x01);
+    dev->i2c_write(dev->ctx, 0x23);
+    dev->i2c_start(dev->ctx);
+    ASSERT_EQ(0xA5, dev->i2c_read(dev->ctx), "Should read back written byte");
+    dev->i2c_stop(dev->ctx);
+    sdd_cleanup();
+    PASS();
+}
+
+TEST(test_sdd_eeprom_page_wrap) {
+    sdd_init();
+    sdd_create_eeprom(0, 0x50, NULL);
+    sdd_device_t *dev = &sdd_registry.devices[0];
+
+    /* Page write crossing 0x003F boundary must wrap within the page */
+    dev->i2c_stop(dev->ctx);
+    dev->i2c_write(dev->ctx, 0x00);
+    dev->i2c_write(dev->ctx, 0x3E);
+    dev->i2c_write(dev->ctx, 0x11);
+    dev->i2c_write(dev->ctx, 0x22);
+    dev->i2c_write(dev->ctx, 0x33);  /* wraps to 0x0000, not 0x0040 */
+    dev->i2c_stop(dev->ctx);
+
+    dev->i2c_write(dev->ctx, 0x00);
+    dev->i2c_write(dev->ctx, 0x3E);
+    dev->i2c_start(dev->ctx);
+    ASSERT_EQ(0x11, dev->i2c_read(dev->ctx), "Byte 0 at 0x003E");
+    ASSERT_EQ(0x22, dev->i2c_read(dev->ctx), "Byte 1 at 0x003F");
+    /* Sequential reads do NOT page-wrap: 0x0040 follows 0x003F */
+    ASSERT_EQ(0xFF, dev->i2c_read(dev->ctx), "Sequential read continues to 0x0040");
+    dev->i2c_stop(dev->ctx);
+
+    /* The wrapped byte landed at 0x0000: random-read it back */
+    dev->i2c_write(dev->ctx, 0x00);
+    dev->i2c_write(dev->ctx, 0x00);
+    dev->i2c_start(dev->ctx);
+    ASSERT_EQ(0x33, dev->i2c_read(dev->ctx), "Byte 2 wrapped to 0x0000");
+    dev->i2c_stop(dev->ctx);
+    sdd_cleanup();
+    PASS();
+}
+
+TEST(test_sdd_eeprom_sequential_wrap) {
+    sdd_init();
+    sdd_create_eeprom(0, 0x50, NULL);
+    sdd_device_t *dev = &sdd_registry.devices[0];
+
+    /* Last byte then sequential read wraps to address 0 */
+    dev->i2c_stop(dev->ctx);
+    dev->i2c_write(dev->ctx, 0x7F);
+    dev->i2c_write(dev->ctx, 0xFF);
+    dev->i2c_write(dev->ctx, 0x5A);
+    dev->i2c_stop(dev->ctx);
+
+    dev->i2c_write(dev->ctx, 0x7F);
+    dev->i2c_write(dev->ctx, 0xFF);
+    dev->i2c_start(dev->ctx);
+    ASSERT_EQ(0x5A, dev->i2c_read(dev->ctx), "Last byte");
+    ASSERT_EQ(0xFF, dev->i2c_read(dev->ctx), "Wraps to address 0 (erased)");
+    dev->i2c_stop(dev->ctx);
+    sdd_cleanup();
+    PASS();
+}
+
+TEST(test_sdd_eeprom_from_arg) {
+    sdd_init();
+    int rc = sdd_create_from_arg("eeprom:i2c=1,addr=0x51");
+    ASSERT_EQ(0, rc, "Create from arg should succeed");
+    ASSERT_EQ(1, sdd_registry.count, "Should have 1 device");
+    ASSERT_EQ(0x51, sdd_registry.devices[0].i2c_addr, "Addr should be 0x51");
+    ASSERT_EQ(1, sdd_registry.devices[0].i2c_bus, "Bus should be 1");
+    sdd_cleanup();
+    PASS();
+}
+
 /* ========================================================================
  * W5500 Live Networking Tests
  * ======================================================================== */
@@ -5172,6 +5278,11 @@ int main(void) {
     RUN_TEST(test_sdd_thermometer_config_register);
     RUN_TEST(test_sdd_create_from_arg);
     RUN_TEST(test_sdd_unknown_type);
+    RUN_TEST(test_sdd_eeprom_create_erased);
+    RUN_TEST(test_sdd_eeprom_byte_write_read);
+    RUN_TEST(test_sdd_eeprom_page_wrap);
+    RUN_TEST(test_sdd_eeprom_sequential_wrap);
+    RUN_TEST(test_sdd_eeprom_from_arg);
     END_CATEGORY("Software-Defined Devices");
 
     BEGIN_CATEGORY("W5500 Live Networking");

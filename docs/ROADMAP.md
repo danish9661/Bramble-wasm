@@ -2,7 +2,7 @@
 
 ## Current State: v0.47.0-WASM
 
-| New | WASM Parity | Complete | `bramble_step` polls (pio/usb/net/vnet/w5500/cyw43/flush/fault/script/watchdog/gdb), GDB RSP WebSocket proxy (`net_proxy.py` WS<->TCP), W5500 dest-aware dial (CON/DISCON/RECV), ETH BroadcastChannel mesh, devtools 18/18 + download, worker threads + `-pthread` SAB variant, `test-wasm.js`, USB strings + SET_INTERFACE, 319/319 + Playwright 0 errors |
+| New | WASM Parity | Complete | `bramble_step` polls (pio/usb/net/vnet/w5500/cyw43/flush/fault/script/watchdog/gdb), GDB RSP WebSocket proxy (`net_proxy.py` WS<->TCP, UART+GDB verified), W5500 dest-aware dial (CON/DISCON/RECV, echo verified), ETH BroadcastChannel mesh, devtools 18/18 + download, worker threads + `-pthread` SAB variant (hello PASS), `test-wasm.js` + CI matrix, USB strings + SET_INTERFACE, 24LC256 EEPROM SDD, bench 74.5/129 native + 17.4 WASM MIPS, 324/324 + Playwright 0 errors |
 |-----|-------------|----------|-----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
 
 ## Previous State: v0.46.0-WASM

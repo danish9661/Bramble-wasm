@@ -12,11 +12,14 @@
  *
  * Built-in devices:
  *   thermometer   — TMP102-compatible I2C temperature sensor (addr 0x48)
+ *   eeprom        — 24LC256-compatible I2C EEPROM, 32KB (addr 0x50)
  *
  * Usage:
  *   -sdd thermometer              Use default temperature (25.0 C)
  *   -sdd thermometer:temp=37.5    Set initial temperature
  *   -sdd thermometer:i2c=1        Attach to I2C1 instead of I2C0
+ *   -sdd eeprom                   32KB EEPROM on I2C0 addr 0x50
+ *   -sdd eeprom:file=eeprom.bin   File-backed persistence
  *
  * Custom devices can be added by implementing the sdd_device_t interface
  * and calling sdd_register().
@@ -100,5 +103,8 @@ int  sdd_create_from_arg(const char *arg);
 
 /* Create a TMP102-compatible thermometer SDD */
 int  sdd_create_thermometer(float initial_temp, int i2c_bus, int i2c_addr);
+
+/* Create a 24LC256-compatible EEPROM SDD (file may be NULL) */
+int  sdd_create_eeprom(int i2c_bus, int i2c_addr, const char *file);
 
 #endif /* SDD_H */

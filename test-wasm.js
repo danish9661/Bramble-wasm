@@ -57,7 +57,7 @@ for (const [f, arch] of [['micropython_rp2040.uf2', 0], ['micropython_rp2350.uf2
     const s = mod._bramble_step(500000);
     let out = '', ch, n = 0;
     while ((ch = mod._bramble_read_uart(0)) !== -1 && n++ < 4000) out += String.fromCharCode(ch);
-    console.log(`[wasm] ${f} steps=${s} uart_len=${out.length} ${out.includes('2') || out.length > 0 ? 'PASS (output)' : 'NOTE (no REPL yet - TinyUSB handshake)'} `);
+    console.log(`[wasm] ${f} steps=${s} uart_len=${out.length} ${out.includes('2') || out.length > 0 ? 'PASS (output)' : 'NOTE (hard_assert halt, native parity - see CHANGELOG)'} `);
   } catch (e) {
     console.log(`[wasm] ${f} ERROR ${e.message}`);
   }

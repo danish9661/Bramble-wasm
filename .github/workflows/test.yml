@@ -1,0 +1,82 @@
+name: Tests (native + WASM + browser)
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  native:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build (native)
+        run: |
+          cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
+          cmake --build build -j
+      - name: Unit tests (319)
+        run: ctest --test-dir build --output-on-failure
+      - name: Benchmark smoke
+        run: ./build/bramble_bench | tail -n 8
+      - name: Firmware smoke (hello/gpio/timer/usb)
+        run: |
+          ./bramble web/hello_world.uf2 | grep -q "Hello from Bramble" && echo "hello PASS"
+          ./bramble web/gpio_test.uf2 -clock 125 | grep -q "LED ON" && echo "gpio PASS"
+          ./bramble web/usb_test.uf2 -clock 125 | grep -q "USB Test Complete" && echo "usb PASS"
+
+  wasm-smoke:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Build (native, for reference run inside test-wasm.js)
+        run: |
+          cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
+          cmake --build build -j
+      - name: WASM boots (uses committed web/bramble.wasm.*)
+        run: node test-wasm.js
+
+  browser:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install Playwright + Chromium
+        run: |
+          pip install playwright
+          python -m playwright install chromium --with-deps
+      - name: Serve web/ and check demo
+        run: |
+          python3 - <<'PY'
+          from playwright.sync_api import sync_playwright
+          import subprocess, time
+          srv = subprocess.Popen(["python3", "-m", "http.server", "18081", "--directory", "web"],
+                                 stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+          time.sleep(1.5)
+          errors = []
+          try:
+              with sync_playwright() as p:
+                  b = p.chromium.launch(args=["--no-sandbox"])
+                  pg = b.new_page()
+                  pg.on("console", lambda m: errors.append(m.text) if m.type == "error" else None)
+                  pg.on("pageerror", lambda e: errors.append(str(e)))
+                  pg.goto("http://localhost:18081/index.html")
+                  pg.wait_for_timeout(4000)
+                  assert "Ready" in pg.text_content("#status"), pg.text_content("#status")
+                  pg.evaluate("loadPreset('hello_world.uf2')")
+                  pg.wait_for_timeout(1500)
+                  pg.click("#btn-run")
+                  pg.wait_for_timeout(3000)
+                  serial = pg.text_content("#serial-output")
+                  assert "Hello from Bramble" in serial, serial[:200]
+                  print("browser hello PASS")
+                  b.close()
+          finally:
+              srv.terminate()
+          assert not errors, errors[:5]
+          print("browser 0 console errors PASS")
+          PY

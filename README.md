@@ -1,6 +1,6 @@
 # Bramble-WASM – RP2040/RP2350 Emulator (WebAssembly)
 
-> **Credit:** This is a WebAssembly port of [Night-Traders-Dev/Bramble](https://github.com/Night-Traders-Dev/Bramble) (MIT). All emulation core, peripherals and 319 tests are from the original project. WASM build and browser UI by [danish9661/Bramble-wasm](https://github.com/danish9661/Bramble-wasm).
+> **Credit:** This is a WebAssembly port of [Night-Traders-Dev/Bramble](https://github.com/Night-Traders-Dev/Bramble) (MIT). All emulation core, peripherals and 319 tests are from the original project (+5 EEPROM SDD tests added here). WASM build and browser UI by [danish9661/Bramble-wasm](https://github.com/danish9661/Bramble-wasm).
 
 A from-scratch emulator for Raspberry Pi RP2040 and RP2350 microcontrollers, supporting both ARM Cortex-M0+ (Thumb) and RISC-V Hazard3 (RV32IMAC) cores. Loads and executes UF2 and ELF firmware with accurate memory mapping and peripheral emulation. Compiles to WebAssembly via Emscripten for browser execution at ~8-10× speed over pure-JS emulators.
 
@@ -8,7 +8,7 @@ A from-scratch emulator for Raspberry Pi RP2040 and RP2350 microcontrollers, sup
 
 ## Current Status: v0.47.0
 
-319 tests passing (zero warnings). **RP2040**: Complete — boots MicroPython, CircuitPython, littleOS. **RP2350 RISC-V**: Complete Hazard3 emulation with Zba, Zbb, Zbs, Zcb, Zcmp, and Zbkb extensions. Boots MicroPython Pico 2 RISC-V and SagePico REPL with full semihosting I/O. **RP2350 ARM**: Cortex-M33 mode (`-arch m33`) with RP2350 ROM format and clock-domain peripheral address mapping. Boots to TinyUSB init. **Tri-architecture**: `-arch m0+` / `-arch m33` / `-arch rv32` with automatic firmware detection via UF2 family ID and picobin IMAGE_DEF blocks. **Networking**: Virtual network bus with TAP bridge, multi-instance Ethernet mesh, W5500 live sockets, and software-defined devices.
+324 tests passing (zero warnings). **RP2040**: Complete — boots MicroPython, CircuitPython, littleOS. **RP2350 RISC-V**: Complete Hazard3 emulation with Zba, Zbb, Zbs, Zcb, Zcmp, and Zbkb extensions. Boots MicroPython Pico 2 RISC-V and SagePico REPL with full semihosting I/O. **RP2350 ARM**: Cortex-M33 mode (`-arch m33`) with RP2350 ROM format and clock-domain peripheral address mapping. Boots to TinyUSB init. **Tri-architecture**: `-arch m0+` / `-arch m33` / `-arch rv32` with automatic firmware detection via UF2 family ID and picobin IMAGE_DEF blocks. **Networking**: Virtual network bus with TAP bridge, multi-instance Ethernet mesh, W5500 live sockets, and software-defined devices.
 
 ### Coverage
 
@@ -35,7 +35,7 @@ A from-scratch emulator for Raspberry Pi RP2040 and RP2350 microcontrollers, sup
 | Firmware Auto-Detect | UF2 + ELF | Auto-detects RP2040/RP2350-ARM/RP2350-RV from UF2 family ID or ELF machine type |
 | RV Performance | ICache | 64K-entry decoded instruction cache for flash/ROM fetches |
 | RV Semihosting | EBREAK | Full ARM semihosting protocol: SYS_WRITE0, SYS_WRITEC, SYS_WRITE, SYS_READC, SYS_EXIT, etc. via EBREAK |
-| Tests | 319 | CTest integrated, 57+ categories (20 RV + 4 M33 + 19 networking tests) |
+| Tests | 324 | CTest integrated, 57+ categories (20 RV + 4 M33 + 19 networking + 5 EEPROM tests) |
 
 ### Peripherals
 
@@ -310,6 +310,12 @@ Bramble now supports flexible debug output modes:
 
 # Custom temperature, bus, and address
 ./bramble firmware.uf2 -sdd thermometer:temp=37.5,i2c=1,addr=0x49
+```
+
+**I2C EEPROM** (24LC256, 32KB, addr `0x50`):
+```bash
+./bramble firmware.uf2 -sdd eeprom
+./bramble firmware.uf2 -sdd eeprom:i2c=1,addr=0x51,file=eeprom.bin
 
 # Combine with mesh networking
 ./bramble fw_sensor.uf2 -wire-eth /tmp/mesh.sock -sdd thermometer:temp=42
@@ -406,6 +412,7 @@ Bramble/
 │   ├── vnet.c          # Virtual network bus (TAP/peer/port routing)
 │   ├── sdd.c           # Software-defined device framework
 │   ├── sdd_thermo.c    # TMP102 I2C thermometer device model
+│   ├── sdd_eeprom.c    # 24LC256 I2C EEPROM model (32KB, page-wrap, file-backed)
 │   ├── storage.c       # Flash write-through persistence
 │   ├── sdcard.c        # SD card SPI emulation (SDHC, file-backed)
 │   ├── emmc.c          # eMMC SPI emulation (file-backed)
@@ -464,7 +471,7 @@ Bramble/
 │   └── rp2350_arm/
 │       └── m33_cpu.h       # Cortex-M33 placeholder
 ├── tests/
-│   └── test_suite.c    # Unit test suite (319 tests, verbose, CTest integrated)
+│   └── test_suite.c    # Unit test suite (324 tests, verbose, CTest integrated)
 ├── test-firmware/
 │   ├── hello_world.S   # Assembly UART test
 │   ├── gpio_test.S     # Assembly GPIO test
@@ -739,6 +746,16 @@ Bramble now ships with a 64K decoded instruction cache enabled by default and op
 - **JIT**: Compiles hot flash/ROM basic blocks and reports execution stats on exit.
 - **Threaded execution**: `-cores 2` and `-cores auto` map emulated cores to host pthreads while preserving a shared-state lock.
 - **I/O behavior**: Firmware output stays on stdout while emulator diagnostics stay on stderr, which keeps pipes and scripted runs predictable.
+
+Measured on a 16-CPU Linux x86-64 host (`./build/bramble_bench`, 4.2M-instruction synthetic loop, best of 3):
+
+| Build | Throughput | Notes |
+|-------|-----------|-------|
+| Native, ICache only | 74.5 MIPS | default |
+| Native, ICache + JIT (`-jit`) | 129 MIPS | 1.74x over ICache |
+| WASM in Node 22 (`littleos.uf2`, real firmware + peripherals) | 17.4 MIPS | `node test-wasm.js` |
+
+For context, the improved pure-JS fork [c1570/rp2040js](https://github.com/c1570/rp2040js) reports ~70M cycles/s on recent PCs. Cycles are not instructions (Thumb averages >1 cycle/instr), so the figures are not directly comparable — but Bramble native is in the same league or faster on CPU-bound loops, while the browser build trades raw speed for the full peripheral set (USB, VNet, SD/eMMC, GDB) that pure-JS emulators lack. Browser frame budget is `500k` instructions/frame (~29ms at 17 MIPS); full 125MHz realtime would need ~80+ MIPS, so heavy firmware runs at ~1/5 realtime in the tab.
 
 For benchmarking details, see `tests/benchmark.c`.
 

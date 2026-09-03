@@ -61,6 +61,7 @@ set(EMU_SOURCES
     src/vnet.c
     src/sdd.c
     src/sdd_thermo.c
+    src/sdd_eeprom.c
     src/rp2350_rv/rv_cpu.c
     src/rp2350_rv/rv_clint.c
     src/rp2350_rv/rv_membus.c
