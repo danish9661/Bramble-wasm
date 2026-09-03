@@ -15,6 +15,7 @@
 
 #include <string.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include "usb.h"
 #include "nvic.h"
 #include "devtools.h"
@@ -105,12 +106,34 @@ static void usb_complete_ep0_out(uint8_t *data, int len) {
     usb_fire_irq();
 }
 
+/* WASM debug probes (see bramble_usb_state32) */
+int usb_enum_state_dbg(void) { return (int)usb_state.enum_state; }
+int usb_ctrl_state_dbg(void) { return (int)usb_state.ctrl_state; }
+
 /* ========================================================================
  * Control Transfer State Machine
  * ======================================================================== */
 
 static void usb_ctrl_step(void) {
     uint32_t buf_ctrl;
+    /* Transition trace (BRAMBLE_USB_TRACE=1): logs enum/ctrl changes + guard.
+     * Invaluable for diagnosing host/device handshake desyncs. */
+    static int trace_en = -1;
+    if (trace_en < 0) trace_en = getenv("BRAMBLE_USB_TRACE") ? 1 : 0;
+    static int last_enum = -1, last_ctrl = -1;
+    if (trace_en && ((int)usb_state.enum_state != last_enum ||
+                     (int)usb_state.ctrl_state != last_ctrl)) {
+        uint32_t in_bc = dpram_read32(USB_DPRAM_BUF_CTRL);
+        uint32_t out_bc = dpram_read32(USB_DPRAM_BUF_CTRL + 4);
+        fprintf(stderr, "[USB-TRACE] enum=%d ctrl=%d EP0IN=%08x EP0OUT=%08x setup=%02x%02x-%04x-%04x-%d\n",
+                (int)usb_state.enum_state, (int)usb_state.ctrl_state,
+                in_bc, out_bc, usb_state.dpram[0], usb_state.dpram[1],
+                usb_state.dpram[2] | (usb_state.dpram[3] << 8),
+                usb_state.dpram[4] | (usb_state.dpram[5] << 8),
+                usb_state.dpram[6] | (usb_state.dpram[7] << 8));
+        last_enum = (int)usb_state.enum_state;
+        last_ctrl = (int)usb_state.ctrl_state;
+    }
     /* SagePico/TinyUSB retry guard: if a control stage stalls (firmware
      * retrying cdcd_control_xfer_cb), auto-complete after N polls so the
      * stack doesn't leak via infinite retries. Counter per ctrl_state. */
@@ -121,13 +144,19 @@ static void usb_ctrl_step(void) {
         ctrl_stall_ctr = 0;
     } else if (usb_state.ctrl_state != USB_CTRL_IDLE &&
                usb_state.ctrl_state != USB_CTRL_DONE) {
-        if (++ctrl_stall_ctr > 20000) {
-            /* 20k polls (~20ms sim) without firmware progress: force DONE
-             * with empty data so enum state machine can advance. */
-            usb_state.ctrl_state = USB_CTRL_DONE;
+        /* A real host NEVER abandons a control transfer: it waits (or port-
+         * resets) but never injects the next SETUP mid-transfer, because the
+         * device would see a stale AVAILABLE arming and TinyUSB panics with
+         * "ep %d %s was already available". Firmware routinely masks IRQs
+         * for >20k instructions during XIP flash ops, so impatience here
+         * desyncs host/device. Just wait; -timeout bounds the run. Log
+         * (throttled) so genuine stalls are still observable. */
+        if (++ctrl_stall_ctr == 2000000) {
+            fprintf(stderr, "[USB] still waiting: enum=%d ctrl=%d (firmware may have IRQs masked)\n",
+                    (int)usb_state.enum_state, (int)usb_state.ctrl_state);
             ctrl_stall_ctr = 0;
-            return;
         }
+        /* Fall through: keep waiting for the firmware (never force DONE). */
     }
     switch (usb_state.ctrl_state) {
     case USB_CTRL_IDLE:
@@ -172,20 +201,15 @@ static void usb_ctrl_step(void) {
             /* Check if transfer is complete:
              * - received all expected bytes, OR
              * - short packet (less than max packet size = 64), OR
-             * - zero-length packet */
+             * - zero-length packet.
+             *
+             * NOTE: do NOT rewrite buf_ctrl LEN here. TinyUSB's ISR counts
+             * each packet from the LEN field left by usb_complete_ep0_in;
+             * stamping the running total corrupts its accounting (remaining
+             * underflows, endpoint re-arms, and the next arming panics with
+             * "ep %d %s was already available"). Parsers read in_accum. */
             if (usb_state.in_accum_len >= usb_state.in_expected_len ||
                 pkt_len < 64 || pkt_len == 0) {
-                /* Copy accumulated data back to EP0 buffer for descriptor parsing */
-                int copy_len = usb_state.in_accum_len;
-                if (copy_len > (int)sizeof(usb_state.dpram) - USB_DPRAM_EP0_BUF)
-                    copy_len = (int)sizeof(usb_state.dpram) - USB_DPRAM_EP0_BUF;
-                memcpy(&usb_state.dpram[USB_DPRAM_EP0_BUF],
-                       usb_state.in_accum, copy_len);
-                /* Update buf_ctrl with total length for parsers */
-                uint32_t final_bc = dpram_read32(USB_DPRAM_BUF_CTRL);
-                final_bc = (final_bc & ~USB_BUF_CTRL_LEN_MASK) |
-                           (copy_len & USB_BUF_CTRL_LEN_MASK);
-                dpram_write32(USB_DPRAM_BUF_CTRL, final_bc);
                 usb_state.ctrl_state = USB_CTRL_WAIT_STATUS_OUT;
             }
             /* else: wait for next packet */
@@ -225,11 +249,12 @@ static void usb_ctrl_step(void) {
  * Enumeration State Machine
  * ======================================================================== */
 
-/* Parse configuration descriptor to find CDC bulk endpoints */
+/* Parse configuration descriptor to find CDC bulk endpoints.
+ * Reads from in_accum (NOT EP0BUF: multi-packet transfers only leave the
+ * last packet staged, and buf_ctrl LEN must keep per-packet values). */
 static void usb_parse_config_desc(void) {
-    uint8_t *buf = &usb_state.dpram[USB_DPRAM_EP0_BUF];
-    uint32_t buf_ctrl = dpram_read32(USB_DPRAM_BUF_CTRL);
-    int total_len = buf_ctrl & USB_BUF_CTRL_LEN_MASK;
+    uint8_t *buf = usb_state.in_accum;
+    int total_len = usb_state.in_accum_len;
     if (total_len < 9) return;
 
     int pos = 0;
@@ -337,9 +362,11 @@ static void usb_enum_step(void) {
 
     case USB_ENUM_GET_CONFIG_FULL:
         if (usb_state.ctrl_state == USB_CTRL_DONE) {
-            /* Read wTotalLength from 9-byte config header */
-            uint8_t *buf = &usb_state.dpram[USB_DPRAM_EP0_BUF];
-            usb_state.config_total_len = buf[2] | (buf[3] << 8);
+            /* Read wTotalLength from the 9-byte config header (in_accum). */
+            usb_state.config_total_len = 0;
+            if (usb_state.in_accum_len >= 4)
+                usb_state.config_total_len =
+                    usb_state.in_accum[2] | (usb_state.in_accum[3] << 8);
             if (usb_state.config_total_len > 255) usb_state.config_total_len = 255;
             usb_state.ctrl_state = USB_CTRL_IDLE;
             /* GET_CONFIGURATION_DESCRIPTOR, full length */
@@ -467,6 +494,12 @@ static void usb_handle_cdc(void) {
 
     if ((buf_ctrl & USB_BUF_CTRL_FULL) && (buf_ctrl & USB_BUF_CTRL_AVAILABLE)) {
         int len = buf_ctrl & USB_BUF_CTRL_LEN_MASK;
+        {
+            static int cin_tr = -1;
+            if (cin_tr < 0) cin_tr = getenv("BRAMBLE_USB_TRACE") ? 1 : 0;
+            if (cin_tr)
+                fprintf(stderr, "[USB-CDC] IN ep=%d len=%d bc=%08x\n", ep, len, buf_ctrl);
+        }
 
         /* Get buffer address from EP control register */
         uint32_t ep_ctrl_off = USB_DPRAM_EP_CTRL + (ep - 1) * 8;  /* IN control */
@@ -479,8 +512,15 @@ static void usb_handle_cdc(void) {
         if (buf_addr > 0 && buf_addr + len <= USBCTRL_DPRAM_SIZE) {
             /* Output CDC data to stdout only when USB CDC stdio is primary
              * (i.e. -stdin mode). When UART stdio is also active, UART
-             * already handles stdout and we must not duplicate the data. */
+             * already handles stdout and we must not duplicate the data.
+             * WASM exception: the browser has a single serial monitor, so
+             * CDC output always goes there (UART firmware is unaffected:
+             * it takes the putchar path in uart.c, gated the same way). */
+#ifdef __EMSCRIPTEN__
+            if (1) {
+#else
             if (usb_cdc_stdout_enabled) {
+#endif
 #ifdef __EMSCRIPTEN__
                 /* WASM: route via putchar so browser serial monitor (uart_tx_buf)
                  * captures USB CDC too; fwrite would bypass it to console.log. */
@@ -537,6 +577,14 @@ static void usb_cdc_rx_drain(void) {
     int ep = usb_state.cdc_out_ep;
     uint32_t buf_ctrl_off = USB_DPRAM_BUF_CTRL + ep * 8 + 4;  /* OUT */
     uint32_t buf_ctrl = dpram_read32(buf_ctrl_off);
+
+    {
+        static int cdc_tr = -1;
+        if (cdc_tr < 0) cdc_tr = getenv("BRAMBLE_USB_TRACE") ? 1 : 0;
+        if (cdc_tr)
+            fprintf(stderr, "[USB-CDC] drain? count=%d ep=%d bc=%08x\n",
+                    usb_state.cdc_rx_count, ep, buf_ctrl);
+    }
 
     if (buf_ctrl & USB_BUF_CTRL_AVAILABLE) {
         /* Get buffer address and max packet size */
@@ -692,6 +740,18 @@ void usb_write32(uint32_t addr, uint32_t val) {
                 case 3: cur &= ~val; break;
             }
             memcpy(&usb_state.dpram[off], &cur, 4);
+        }
+        /* Trace EP0 buf_ctrl arming (BRAMBLE_USB_TRACE=1) */
+        if (off == USB_DPRAM_BUF_CTRL || off == USB_DPRAM_BUF_CTRL + 4) {
+            static int ep0_tr = -1;
+            if (ep0_tr < 0) ep0_tr = getenv("BRAMBLE_USB_TRACE") ? 1 : 0;
+            if (ep0_tr) {
+                uint32_t bc;
+                memcpy(&bc, &usb_state.dpram[off], 4);
+                fprintf(stderr, "[USB-EP0] %s <= %08x (enum=%d ctrl=%d)\n",
+                        off == USB_DPRAM_BUF_CTRL ? "IN " : "OUT",
+                        bc, (int)usb_state.enum_state, (int)usb_state.ctrl_state);
+            }
         }
         return;
     }

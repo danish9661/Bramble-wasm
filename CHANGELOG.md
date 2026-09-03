@@ -1,5 +1,40 @@
 # Bramble RP2040/RP2350 Emulator - Changelog
 
+## [0.48.0] - 2026-09-03
+
+### Fixed - MicroPython REPL brings up (USB multi-packet LEN corruption)
+
+Root-caused with a locally built v1.22.1 ELF + GDB breakpoints: TinyUSB
+panicked with `ep 0 in was already available` from
+`_hw_endpoint_buffer_control_update32` (`rp2040_usb.c:115`).
+
+- **Multi-packet IN completion corrupted buf_ctrl LEN** (`src/usb.c`):
+  the transfer-complete path stamped the running total into the length
+  field. TinyUSB's ISR counts each packet from LEN, so a 64+11 byte config
+  descriptor was counted 64+75: `remaining_len` underflowed, the endpoint
+  re-armed 64 bytes, and the next arming panicked. The completion no longer
+  touches LEN (parsers read `in_accum` instead); covered by new test
+  `test_usb_multipacket_in_keeps_per_packet_len` (fails on old code).
+- **Host/device lockstep**: removed the control-stall auto-DONE advance —
+  a real host never injects the next SETUP mid-transfer (stale AVAILABLE
+  is exactly what TinyUSB panics on). Stalls now log throttled warnings.
+- **stdin routing**: USB CDC gets raw bytes (MicroPython wants CR to submit
+  a line); UART shells keep CR/CRLF→LF. Applies to native (`main.c`) and
+  browser input (`bramble_wasm.c` feed + Send appends CR).
+- **WASM serial monitor**: USB CDC output always captured via `putchar`
+  (native `-stdin` gate does not exist in the browser); UART path unchanged.
+
+Verified: bundled v1.22.1 REPL banner + `print(6*7)` → `42`, native and
+WASM (`test-wasm.js` asserts both). Remaining MicroPython-family work (e.g.
+SagePico welcome message) is still open — see Known Issues.
+
+### Tests
+
+- 325/325 tests passing (324 + 1 USB multi-packet regression, proven to fail
+  pre-fix), no regressions. Playwright Chromium: 0 console errors.
+
+---
+
 ## [0.47.0] - 2026-09-03
 
 ### Added - WASM parity: polls, GDB proxy, live net, devtools-18, threads, tests
@@ -19,7 +54,6 @@
 
 ### Known Issues
 
-- **MicroPython REPL**: bundled `micropython_rp2040.uf2` (v1.22.1) halts ~270k steps via Pico SDK `hard_assert` ("Hard assert" literal at flash `0x1003C1DD`) → prints `"\n"` → `_exit(1)` → `BKPT #0` → HardFault → SDK default fault handler (also `BKPT`) → double-fault lockup (`PC=0xFFFFFFFF`). Identical on native and WASM (not a WASM gap). Attributing the asserting call-site needs ELF symbols (no ARM toolchain in this env); REPL untested.
 - **ARM SagePico**: as in 0.46.0; string/`SET_INTERFACE` states added but welcome message still not reached.
 - **W5500 live**: needs `web/net_proxy.py` running; direct `AF_INET` unavailable in the browser sandbox.
 

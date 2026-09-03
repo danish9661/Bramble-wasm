@@ -1,6 +1,6 @@
 # Bramble-WASM – WebAssembly Port
 
-Compiled from C (Bramble v0.47.0) to WASM via Emscripten 6.0.9 (`emsdk`) for browser execution.
+Compiled from C (Bramble v0.48.0) to WASM via Emscripten 6.0.9 (`emsdk`) for browser execution.
 
 ## Build
 

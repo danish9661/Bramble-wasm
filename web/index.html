@@ -341,6 +341,9 @@ $('btn-send').onclick = () => {
   if (!mod) return;
   const text = $('uart-input').value;
   for (const ch of text) mod._bramble_write_uart(ch.charCodeAt(0));
+  // CR submits the line: USB REPLs (MicroPython) want raw CR, UART shells
+  // get CR->LF via feed_uart_rx. Sent only when there is text to submit.
+  if (text.length) mod._bramble_write_uart(13);
   $('uart-input').value = '';
 };
 

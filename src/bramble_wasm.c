@@ -233,15 +233,25 @@ void bramble_write_uart(int ch) {
 /* Called periodically by the step loop to feed UART RX from our buffer. */
 static void feed_uart_rx(void) {
     /* Route like native stdin_pending_flush: USB CDC preferred when enumerated,
-     * else UART0. This lets MicroPython REPL work over USB in browser. */
+     * else UART0. USB gets raw bytes (MicroPython wants CR); UART normalizes
+     * CR/CRLF to LF (littleOS shells). */
+    static int wasm_saw_cr = 0;
     int usb_active = usb_cdc_stdio_active();
     while (uart_rx_tail != uart_rx_head) {
         int ch = uart_rx_buf[uart_rx_tail];
         uart_rx_tail = (uart_rx_tail + 1) % 256;
         if (usb_active) {
+            wasm_saw_cr = 0;
             if (!usb_cdc_rx_push((uint8_t)ch))
                 uart_rx_push(0, (uint8_t)ch);
+        } else if (ch == '\r') {
+            uart_rx_push(0, (uint8_t)'\n');
+            wasm_saw_cr = 1;
+        } else if (ch == '\n') {
+            if (wasm_saw_cr) { wasm_saw_cr = 0; continue; }
+            uart_rx_push(0, (uint8_t)ch);
         } else {
+            wasm_saw_cr = 0;
             uart_rx_push(0, (uint8_t)ch);
         }
     }
@@ -251,7 +261,7 @@ static void feed_uart_rx(void) {
         int n = bramble_net_pop_rx(tmp, sizeof(tmp));
         for (int i = 0; i < n; i++) {
             if (usb_cdc_stdio_active()) {
-                if (!usb_cdc_rx_push(tmp[i]))
+                if (!usb_cdc_rx_push((uint8_t)tmp[i]))
                     uart_rx_push(0, tmp[i]);
             } else {
                 uart_rx_push(0, tmp[i]);
@@ -521,6 +531,14 @@ uint8_t *bramble_get_flash_ptr(void) {
 
 uint8_t *bramble_get_sram_ptr(void) {
     return rv_bus.sram;
+}
+
+/* USB comprehesion probe: (enum<<16)|ctrl_state, for diagnosing stalls */
+uint32_t bramble_usb_state32(void) {
+    extern int usb_enum_state_dbg(void);
+    extern int usb_ctrl_state_dbg(void);
+    return ((uint32_t)(uint32_t)usb_enum_state_dbg() << 16) |
+           (uint32_t)(uint32_t)usb_ctrl_state_dbg();
 }
 
 /* ============ Completed WASM controls (cores/JIT/debug/flash/SD/net) ============ */

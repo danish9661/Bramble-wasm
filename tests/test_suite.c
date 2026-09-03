@@ -2742,6 +2742,47 @@ TEST(test_usb_cdc_rx_push_requires_ready_console) {
     PASS();
 }
 
+TEST(test_usb_multipacket_in_keeps_per_packet_len) {
+    usb_init();
+    /* Keep the enum machine out of the way; drive the control stage manually */
+    usb_state.enum_state = USB_ENUM_ACTIVE;
+    usb_state.ctrl_state = USB_CTRL_WAIT_DATA_IN;
+    usb_state.in_accum_len = 0;
+    usb_state.in_expected_len = 75;
+    mem_write32(USBCTRL_REGS_BASE + USB_MAIN_CTRL, 1);  /* enable controller */
+
+    /* Packet 1: 64 bytes (full, more expected) */
+    for (int i = 0; i < 64; i++)
+        mem_write8(USBCTRL_DPRAM_BASE + USB_DPRAM_EP0_BUF + i, (uint8_t)(0xA0 + (i & 0x0F)));
+    mem_write32(USBCTRL_DPRAM_BASE + USB_DPRAM_BUF_CTRL,
+                USB_BUF_CTRL_AVAILABLE | USB_BUF_CTRL_FULL | 64);
+    usb_step();
+    ASSERT_EQ(USB_CTRL_WAIT_DATA_IN, usb_state.ctrl_state, "Should wait for packet 2");
+    ASSERT_EQ(64, usb_state.in_accum_len, "Should accumulate packet 1");
+
+    /* Packet 2: 11 bytes (short -> transfer complete, 64+11=75) */
+    for (int i = 0; i < 11; i++)
+        mem_write8(USBCTRL_DPRAM_BASE + USB_DPRAM_EP0_BUF + i, (uint8_t)(0xB0 + i));
+    mem_write32(USBCTRL_DPRAM_BASE + USB_DPRAM_BUF_CTRL,
+                USB_BUF_CTRL_AVAILABLE | USB_BUF_CTRL_FULL | 11);
+    usb_step();
+    ASSERT_EQ(USB_CTRL_WAIT_STATUS_OUT, usb_state.ctrl_state, "Transfer should complete");
+    ASSERT_EQ(75, usb_state.in_accum_len, "Should accumulate all 75 bytes");
+
+    /* Regression (MicroPython full-config descriptor): buf_ctrl LEN must
+     * stay per-packet (11), not the running total (75). TinyUSB's ISR counts
+     * each packet from LEN; a total here makes remaining_len underflow, the
+     * endpoint re-arms, and the next arming panics with
+     * "ep %d %s was already available". */
+    {
+        uint32_t bc = mem_read32(USBCTRL_DPRAM_BASE + USB_DPRAM_BUF_CTRL);
+        ASSERT_EQ(11, (int)(bc & USB_BUF_CTRL_LEN_MASK), "LEN must be last packet length");
+        ASSERT_EQ(0, (int)(bc & USB_BUF_CTRL_AVAILABLE), "AVAILABLE must be clear");
+        ASSERT_EQ(0, (int)(bc & USB_BUF_CTRL_FULL), "FULL must be clear");
+    }
+    PASS();
+}
+
 /* ========================================================================
  * Flash ROM Function Tests
  * ======================================================================== */
@@ -5075,6 +5116,7 @@ int main(void) {
     RUN_TEST(test_usb_main_ctrl_readback);
     RUN_TEST(test_usb_cdc_stdio_active_requires_bidirectional_console);
     RUN_TEST(test_usb_cdc_rx_push_requires_ready_console);
+    RUN_TEST(test_usb_multipacket_in_keeps_per_packet_len);
     END_CATEGORY("USB Controller");
 
     BEGIN_CATEGORY("Flash ROM Functions");

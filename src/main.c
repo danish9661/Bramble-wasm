@@ -217,9 +217,27 @@ static void stdin_pending_flush(void) {
         int pushed = 0;
 
         if (target == STDIN_TARGET_USB_CDC) {
+            /* USB CDC (MicroPython REPL): pass bytes through unchanged.
+             * The REPL treats CR as Enter; translating to LF breaks line
+             * submission (input echoes but never executes). */
             pushed = usb_cdc_rx_push(byte);
         } else {
-            pushed = uart_rx_push(0, byte);
+            /* UART shells (littleOS): normalize CR/CRLF to LF so Enter
+             * reliably submits a single line. */
+            if (byte == '\r') {
+                pushed = uart_rx_push(0, '\n');
+                stdin_saw_cr = 1;
+            } else if (byte == '\n') {
+                if (stdin_saw_cr) {
+                    stdin_saw_cr = 0;
+                    stdin_pending_pop();
+                    continue;
+                }
+                pushed = uart_rx_push(0, byte);
+            } else {
+                stdin_saw_cr = 0;
+                pushed = uart_rx_push(0, byte);
+            }
         }
 
         if (!pushed) {
@@ -239,26 +257,9 @@ static void uart_stdin_poll(void) {
         ssize_t n = read(STDIN_FILENO, buf, sizeof(buf));
         if (n > 0) {
             for (ssize_t i = 0; i < n; i++) {
-                uint8_t ch = buf[i];
-
-                /* Normalize line endings to LF so guest shells reliably treat
-                 * Enter/Return and piped input as a single submitted line. */
-                if (ch == '\r') {
-                    stdin_pending_push('\n');
-                    stdin_saw_cr = 1;
-                    continue;
-                }
-                if (ch == '\n') {
-                    if (stdin_saw_cr) {
-                        stdin_saw_cr = 0;
-                        continue;
-                    }
-                    stdin_pending_push('\n');
-                    continue;
-                }
-
-                stdin_saw_cr = 0;
-                stdin_pending_push(ch);
+                /* Queue raw bytes; CR/LF normalization happens per-target
+                 * in stdin_pending_flush (USB wants raw CR, UART wants LF). */
+                stdin_pending_push(buf[i]);
             }
         }
     }

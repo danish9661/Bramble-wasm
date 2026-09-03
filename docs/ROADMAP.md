@@ -1,6 +1,11 @@
 # Bramble RP2040/RP2350 Emulator - Roadmap
 
-## Current State: v0.47.0-WASM
+## Current State: v0.48.0
+
+| New | MicroPython REPL | Complete | USB multi-packet LEN fix (buf_ctrl stays per-packet), host/device lockstep (no forced DONE), stdin CR/LF per-target routing, WASM CDC capture; REPL banner + eval verified native + browser; 325/325 |
+|-----|------------------|----------|----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
+
+## Previous State: v0.47.0-WASM
 
 | New | WASM Parity | Complete | `bramble_step` polls (pio/usb/net/vnet/w5500/cyw43/flush/fault/script/watchdog/gdb), GDB RSP WebSocket proxy (`net_proxy.py` WS<->TCP, UART+GDB verified), W5500 dest-aware dial (CON/DISCON/RECV, echo verified), ETH BroadcastChannel mesh, devtools 18/18 + download, worker threads + `-pthread` SAB variant (hello PASS), `test-wasm.js` + CI matrix, USB strings + SET_INTERFACE, 24LC256 EEPROM SDD, bench 74.5/129 native + 17.4 WASM MIPS, 324/324 + Playwright 0 errors |
 |-----|-------------|----------|-----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|

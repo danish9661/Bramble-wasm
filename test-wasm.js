@@ -1,12 +1,12 @@
 #!/usr/bin/env node
-// WASM test suite: runs same 319 native tests via Node + MicroPython USB check.
+// WASM test suite: native ctest + WASM boots + MicroPython USB-CDC REPL.
 import BrambleModule from './web/bramble.wasm.js';
 import fs from 'fs';
 import { execSync } from 'child_process';
 
 const mod = await BrambleModule({ print: () => {}, printErr: () => {} });
 
-// 1) Native reference (must be 319/319)
+// 1) Native reference (must be 325/325)
 try {
   const out = execSync('ctest --test-dir build --output-on-failure 2>&1 | tail -n 5', { encoding: 'utf8' });
   console.log('[native]', out.trim().split('\n').pop());
@@ -39,9 +39,10 @@ await wasmBoot('timer_test.uf2', 0, 200000, 'Timer Test Complete');
 await wasmBoot('littleos_pico2.uf2', 2, 200000, '');
 await wasmBoot('littleos_pico2_riscv.uf2', 1, 200000, '');
 
-// 3) MicroPython USB-CDC REPL (SagePico TinyUSB issue check)
-// boots via USB enumeration (usb_step now in bramble_step); REPL over USB CDC -> stdout capture
-for (const [f, arch] of [['micropython_rp2040.uf2', 0], ['micropython_rp2350.uf2', 2]]) {
+// 3) MicroPython USB-CDC REPL (bundled v1.22.1 UF2): banner + eval 6*7==42.
+// Boots via USB enumeration; input via bramble_write_uart (routed to USB CDC
+// when enumerated, raw CR submits the line); output via CDC -> serial monitor.
+for (const [f, arch] of [['micropython_rp2040.uf2', 0]]) {
   try {
     mod._bramble_init(arch);
     mod._bramble_set_clock(125);
@@ -51,15 +52,21 @@ for (const [f, arch] of [['micropython_rp2040.uf2', 0], ['micropython_rp2350.uf2
     mod._bramble_load_uf2(ptr, uf2.length);
     mod._free(ptr);
     mod._bramble_reset();
-    // feed "print(1+1)\r" via USB CDC stdin path (uart RX mirrors to CDC when enumerated)
-    const cmd = 'print(1+1)\r';
-    for (const c of cmd) mod._bramble_write_uart(c.charCodeAt(0));
-    const s = mod._bramble_step(500000);
+    mod._bramble_step(3000000);
     let out = '', ch, n = 0;
-    while ((ch = mod._bramble_read_uart(0)) !== -1 && n++ < 4000) out += String.fromCharCode(ch);
-    console.log(`[wasm] ${f} steps=${s} uart_len=${out.length} ${out.includes('2') || out.length > 0 ? 'PASS (output)' : 'NOTE (hard_assert halt, native parity - see CHANGELOG)'} `);
+    while ((ch = mod._bramble_read_uart(0)) !== -1 && n++ < 8000) out += String.fromCharCode(ch);
+    const banner = out.includes('MicroPython') && out.includes('>>>');
+    const cmd = 'print(6*7)\r';
+    for (const c of cmd) mod._bramble_write_uart(c.charCodeAt(0));
+    mod._bramble_step(2000000);
+    out = ''; n = 0;
+    while ((ch = mod._bramble_read_uart(0)) !== -1 && n++ < 8000) out += String.fromCharCode(ch);
+    const eval42 = out.includes('42');
+    console.log(`[wasm] ${f} banner=${banner ? 'PASS' : 'FAIL'} eval42=${eval42 ? 'PASS' : 'FAIL'} ${JSON.stringify(out.slice(0, 60))}`);
+    if (!banner || !eval42) process.exitCode = 1;
   } catch (e) {
     console.log(`[wasm] ${f} ERROR ${e.message}`);
+    process.exitCode = 1;
   }
 }
 
