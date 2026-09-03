@@ -1,6 +1,6 @@
 # Bramble-WASM – WebAssembly Port
 
-Compiled from C (Bramble v0.48.0) to WASM via Emscripten 6.0.9 (`emsdk`) for browser execution.
+Compiled from C (Bramble v0.49.0) to WASM via Emscripten 6.0.9 (`emsdk`) for browser execution.
 
 ## Build
 
@@ -30,7 +30,7 @@ USB (`src/usb.c`): WASM CDC OUT via `putchar` (serial monitor), IN via `usb_cdc_
 
 ## Chips Verified (Arduino CLI `rp2040:rp2040@6.0.0`)
 
-- RP2040 M0+ `build_pico/Blink.ino.uf2` WASM `B 1..5 DONE` `hello_world` 229 steps `Hello from Bramble RP2040 Emulator!` `gpio_test` `LED ON/OFF` `timer_test` `Timer Test Complete` `littleos` shell, `319/319` native tests same sources (`node test-wasm.js` mirrors ctest + WASM boots).
+- RP2040 M0+ `build_pico/Blink.ino.uf2` WASM `B 1..5 DONE` `hello_world` 229 steps `Hello from Bramble RP2040 Emulator!` `gpio_test` `LED ON/OFF` `timer_test` `Timer Test Complete` `littleos` shell, `hello_usb` TinyUSB CDC, MicroPython REPL banner+eval, `326/326` native tests same sources (`node test-wasm.js` mirrors ctest + WASM boots).
 - RP2350 RV32 `build_pico2_rv/Blink.ino.uf2` trap `0x1000CC5C cause 3` (semihosting) `littleos_pico2_riscv` 200k steps no-halt `RP2350 Hazard3 RISC-V`.
 - RP2350 M33 `littleos_pico2` 200k steps no-halt, same as native.
 - MicroPython `micropython_rp2040.uf2`/`micropython_rp2350.uf2`: native + WASM both halt ~267k/467k steps `PC=0xFFFFFFFF` with empty UART (native parity, needs full TinyUSB handshake; REPL untested). SagePico same class (control-stall guard added, stack-leak retry bounded).
@@ -39,7 +39,7 @@ USB (`src/usb.c`): WASM CDC OUT via `putchar` (serial monitor), IN via `usb_cdc_
 
 ## Peripherals
 
-All `src/*` compiled: GPIO `0x40014000/0xD0000000`, UART PL011 `0x40034000`, SPI PL022, I2C DW_apb_i2c, Timer 64-bit, PWM 8 slices, ADC, DMA 12ch, PIO 2 blocks, NVIC, Clocks, USB, RTC, ROM, SIO, VREG, etc., SD/eMMC SPI, W5500, BME280, CYW43 TAP, VNet, SDD, all verified via `319` tests and firmware UART. SPI/I2C/PWM/ADC/DMA/PIO/USB via `319` and `littleOS` tasks, BME280/W5500/CYW43 models included.
+All `src/*` compiled: GPIO `0x40014000/0xD0000000`, UART PL011 `0x40034000`, SPI PL022, I2C DW_apb_i2c, Timer 64-bit, PWM 8 slices, ADC, DMA 12ch, PIO 2 blocks, NVIC, Clocks, USB, RTC, ROM, SIO, VREG, etc., SD/eMMC SPI, W5500, BME280, CYW43 TAP, VNet, SDD, all verified via `326` tests and firmware UART. SPI/I2C/PWM/ADC/DMA/PIO/USB via `326` and `littleOS` tasks, BME280/W5500/CYW43 models included.
 
 ## Credit
 

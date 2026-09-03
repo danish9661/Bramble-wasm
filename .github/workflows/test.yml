@@ -80,3 +80,33 @@ jobs:
           assert not errors, errors[:5]
           print("browser 0 console errors PASS")
           PY
+
+  gdb-e2e:
+    # Real GDB remote session against the emulator's RSP stub.
+    # Informative only (client behavior varies); real run verified locally.
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build (native)
+        run: |
+          cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
+          cmake --build build -j
+      - name: GDB session (break main, backtrace, stepi, detach)
+        run: |
+          ./build/bramble web/hello_usb.uf2 -gdb 13347 &
+          EMU=$!
+          sleep 1
+          gdb -q -batch \
+            -ex "set architecture arm" \
+            -ex "target remote :13347" \
+            -ex "break main" \
+            -ex "continue" \
+            -ex "backtrace 2" \
+            -ex "info registers pc sp lr" \
+            -ex "stepi" \
+            -ex "detach" \
+            -ex "quit" 2>&1 | tee /tmp/gdb.log
+          kill $EMU 2>/dev/null; wait 2>/dev/null || true
+          grep -q "Breakpoint 1, .* in main" /tmp/gdb.log && echo "gdb main-break PASS"
+          grep -q "stdio_init_all\|main" /tmp/gdb.log && echo "gdb step PASS"

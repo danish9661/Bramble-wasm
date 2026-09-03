@@ -42,6 +42,31 @@ static void timer_fire_alarm(int i) {
     timer_state.armed &= ~(1 << i);
 }
 
+/* Time until the next armed alarm fires, in microseconds.
+ * Returns 0 only if an alarm is already due; default 1000 when idle.
+ * Used to fast-forward time while all cores sleep (WFI/WFE). */
+uint32_t timer_next_wakeup_us(void) {
+    uint32_t now = (uint32_t)(timer_state.time_us & 0xFFFFFFFF);
+    uint32_t best = 0xFFFFFFFF;
+    int found = 0;
+    for (int i = 0; i < 4; i++) {
+        if (!(timer_state.armed & (1 << i)))
+            continue;
+        found = 1;
+        if ((int32_t)(now - timer_state.alarm[i]) >= 0) {
+            return 1;  /* already due: minimal step still fires it */
+        }
+        {
+            uint32_t dt = timer_state.alarm[i] - now;
+            if (dt < best)
+                best = dt;
+        }
+    }
+    if (!found)
+        return 1000;  /* nothing armed: modest chunk, keep polling inputs */
+    return best;
+}
+
 void timer_tick(uint32_t cycles) {
     if (timer_state.paused) {
         return;

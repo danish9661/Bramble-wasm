@@ -1656,25 +1656,29 @@ void dual_core_step(void) {
 
         /* Skip cores sleeping in WFI/WFE — wake when interrupt pending */
         if (cores[c].is_wfi) {
-            /* SysTick keeps running while the core is asleep. */
-            systick_tick_for_core(c, 1);
-
-            /* If every active core is currently asleep/halted, keep the shared
-             * timer moving so timer-driven wakeups can still happen. */
+            /* If every active core is asleep, fast-forward time to the next
+             * timer deadline instead of trickling 1 cycle/iteration (a 1s
+             * sleep_ms would otherwise take minutes of wall time). Capped
+             * so sub-ms precision and RTC math stay sane. */
             if (c == CORE0 &&
                 (num_active_cores == 1 || cores[CORE1].is_wfi || cores[CORE1].is_halted)) {
-                timing_config.cycle_accumulator += 1;
-                uint32_t us = timing_config.cycle_accumulator / timing_config.cycles_per_us;
-                if (us > 0) {
-                    timing_config.cycle_accumulator -= us * timing_config.cycles_per_us;
-                    timer_tick(us);
-                    rtc_tick(us);
-                    /* Tick RP2350 TIMER1 if active */
-                    if (membus_rp2350_mode && membus_rp2350_periph) {
-                        rp2350_periph_state_t *ps = (rp2350_periph_state_t *)membus_rp2350_periph;
-                        rp2350_timer1_tick(ps, us);
-                    }
+                uint32_t chunk_us = timer_next_wakeup_us();
+                if (chunk_us > 10000)
+                    chunk_us = 10000;
+                /* SysTick keeps running while cores are asleep. */
+                systick_tick_for_core(CORE0, chunk_us * timing_config.cycles_per_us);
+                if (num_active_cores > 1)
+                    systick_tick_for_core(CORE1, chunk_us * timing_config.cycles_per_us);
+                timer_tick(chunk_us);
+                rtc_tick(chunk_us);
+                /* Tick RP2350 TIMER1 if active */
+                if (membus_rp2350_mode && membus_rp2350_periph) {
+                    rp2350_periph_state_t *ps = (rp2350_periph_state_t *)membus_rp2350_periph;
+                    rp2350_timer1_tick(ps, chunk_us);
                 }
+            } else {
+                /* SysTick keeps running while the core is asleep. */
+                systick_tick_for_core(c, 1);
             }
 
             /* Check for pending interrupt that would wake this core */

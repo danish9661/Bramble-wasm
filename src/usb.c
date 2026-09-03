@@ -643,6 +643,18 @@ void usb_step(void) {
         usb_handle_cdc();
         usb_cdc_rx_drain();
     }
+
+    /* Level-triggered IRQ: real HW keeps the line asserted while any
+     * unmasked source is pending, so firmware that enables INTE/NVIC after
+     * the event still takes the interrupt. We used to fire only on edges,
+     * which lost the first SETUP when firmware enabled USB interrupts a
+     * few hundred instructions later (hello_usb stuck before EP0 traffic). */
+    {
+        uint32_t intr = usb_compute_intr();
+        uint32_t ints = (intr | usb_state.intf) & usb_state.inte;
+        if (ints)
+            nvic_signal_irq(5);  /* USBCTRL_IRQ */
+    }
 }
 
 /* ========================================================================
@@ -758,6 +770,15 @@ void usb_write32(uint32_t addr, uint32_t val) {
 
     /* Controller registers */
     uint32_t offset = base - USBCTRL_REGS_BASE;
+
+    /* Trace key register writes (BRAMBLE_USB_TRACE=1) */
+    if (offset == USB_MAIN_CTRL || offset == USB_SIE_CTRL || offset == USB_INTE) {
+        static int reg_tr = -1;
+        if (reg_tr < 0) reg_tr = getenv("BRAMBLE_USB_TRACE") ? 1 : 0;
+        if (reg_tr)
+            fprintf(stderr, "[USB-REG] +%02x <= %08x (enum=%d ctrl=%d)\n",
+                    offset, val, (int)usb_state.enum_state, (int)usb_state.ctrl_state);
+    }
 
     #define ALIAS_APPLY(reg) do { \
         switch (alias) { \

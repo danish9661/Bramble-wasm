@@ -40,6 +40,7 @@ typedef struct {
 void timer_init(void);
 void timer_reset(void);
 void timer_tick(uint32_t cycles);  /* Update timer based on CPU cycles */
+uint32_t timer_next_wakeup_us(void);  /* µs until next armed alarm (WFI fast-forward) */
 uint32_t timer_read32(uint32_t addr);
 void timer_write32(uint32_t addr, uint32_t val);
 

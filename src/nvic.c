@@ -172,7 +172,7 @@ uint8_t nvic_get_exception_priority(uint32_t vector_num) {
 void nvic_enable_irq(uint32_t irq) {
     if (irq < NUM_EXTERNAL_IRQS) {
         nvic_state_t *ns = nvic_cur();
-        ns->enable |= (1 << irq);
+        ns->enable |= (1u << irq);
         if (cpu.debug_enabled)
             printf("[NVIC] Core %d: Enabled IRQ %u (enable mask=0x%X)\n",
                    get_active_core(), irq, ns->enable);
@@ -183,7 +183,7 @@ void nvic_enable_irq(uint32_t irq) {
 void nvic_disable_irq(uint32_t irq) {
     if (irq < NUM_EXTERNAL_IRQS) {
         nvic_state_t *ns = nvic_cur();
-        ns->enable &= ~(1 << irq);
+        ns->enable &= ~(1u << irq);
         if (cpu.debug_enabled)
             printf("[NVIC] Core %d: Disabled IRQ %u (enable mask=0x%X)\n",
                    get_active_core(), irq, ns->enable);
@@ -194,7 +194,7 @@ void nvic_disable_irq(uint32_t irq) {
 void nvic_set_pending(uint32_t irq) {
     if (irq < NUM_EXTERNAL_IRQS) {
         nvic_state_t *ns = nvic_cur();
-        ns->pending |= (1 << irq);
+        ns->pending |= (1u << irq);
         corepool_wake_cores();
         if (cpu.debug_enabled)
             printf("[NVIC] Core %d: Set pending IRQ %u (pending=0x%X, enable=0x%X)\n",
@@ -206,7 +206,7 @@ void nvic_set_pending(uint32_t irq) {
 void nvic_clear_pending(uint32_t irq) {
     if (irq < NUM_EXTERNAL_IRQS) {
         nvic_state_t *ns = nvic_cur();
-        ns->pending &= ~(1 << irq);
+        ns->pending &= ~(1u << irq);
         if (cpu.debug_enabled)
             printf("[NVIC] Core %d: Cleared pending IRQ %u (pending now=0x%X)\n",
                    get_active_core(), irq, ns->pending);
@@ -232,8 +232,8 @@ void nvic_set_priority(uint32_t irq, uint8_t priority) {
  */
 uint32_t nvic_get_pending_irq(void) {
     nvic_state_t *ns = nvic_cur();
-    /* Mask to valid IRQ range (RP2040 has 26 external IRQs, bits 0-25) */
-    uint32_t valid_mask = (1u << NUM_EXTERNAL_IRQS) - 1;
+    /* Mask to valid IRQ range (32 bits: 26 wired + user IRQs 26-31) */
+    uint32_t valid_mask = (NUM_EXTERNAL_IRQS >= 32) ? 0xFFFFFFFFu : ((1u << NUM_EXTERNAL_IRQS) - 1);
     uint32_t pending_and_enabled = ns->pending & ns->enable & valid_mask;
 
     if (pending_and_enabled == 0) {
@@ -509,7 +509,7 @@ void nvic_signal_irq(uint32_t irq) {
 
         /* Set pending on BOTH cores (shared interrupt line) */
         for (int c = 0; c < 2; c++) {
-            nvic_states[c].pending |= (1 << irq);
+            nvic_states[c].pending |= (1u << irq);
         }
         corepool_wake_cores();
     }

@@ -36,6 +36,8 @@ async function wasmBoot(name, arch, steps, expectSub) {
 await wasmBoot('hello_world.uf2', 0, 50000, 'Hello from Bramble');
 await wasmBoot('gpio_test.uf2', 0, 200000, 'LED ON');
 await wasmBoot('timer_test.uf2', 0, 200000, 'Timer Test Complete');
+// TinyUSB CDC via Pico SDK (user-IRQ pump + multi-packet IN needs full enum)
+await wasmBoot('hello_usb.uf2', 0, 3000000, 'Hello, world!');
 await wasmBoot('littleos_pico2.uf2', 2, 200000, '');
 await wasmBoot('littleos_pico2_riscv.uf2', 1, 200000, '');
 

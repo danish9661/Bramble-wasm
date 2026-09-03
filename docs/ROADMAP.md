@@ -1,6 +1,11 @@
 # Bramble RP2040/RP2350 Emulator - Roadmap
 
-## Current State: v0.48.0
+## Current State: v0.49.0
+
+| New | USB CDC + IRQs | Complete | NVIC user IRQs 26-31 (tud_task pump), level-triggered USBCTRL_IRQ, WFI fast-forward to next alarm; Pico SDK hello_usb prints via CDC native + browser; W5500 real-internet dial verified; real-GDB E2E verified; 326/326 |
+|-----|----------------|----------|-----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
+
+## Previous State: v0.48.0
 
 | New | MicroPython REPL | Complete | USB multi-packet LEN fix (buf_ctrl stays per-packet), host/device lockstep (no forced DONE), stdin CR/LF per-target routing, WASM CDC capture; REPL banner + eval verified native + browser; 325/325 |
 |-----|------------------|----------|----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|

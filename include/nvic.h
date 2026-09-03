@@ -73,9 +73,12 @@
 #define IRQ_I2C1_IRQ                24     /* I2C1_IRQ */
 #define IRQ_RTC_IRQ                 25     /* RTC_IRQ */
 
-#define NUM_EXTERNAL_IRQS           26     /* RP2040 has 26 external IRQs */
+#define NUM_EXTERNAL_IRQS           32     /* 26 wired on RP2040 + user IRQs 26-31
+                                          * (software-pended via ISPR; the Pico
+                                          * SDK claims them for background tasks
+                                          * such as USB tud_task pumping) */
 #define NUM_EXCEPTIONS              16     /* System exceptions (0-15) */
-#define NUM_TOTAL_IRQS              (NUM_EXCEPTIONS + NUM_EXTERNAL_IRQS)  /* 42 total */
+#define NUM_TOTAL_IRQS              (NUM_EXCEPTIONS + NUM_EXTERNAL_IRQS)  /* 48 total */
 
 /* Priority levels (Cortex-M0+ supports 4 levels, using bits 6-7 of IPR) */
 #define IRQ_PRIORITY_0              0      /* Highest priority */

@@ -1,5 +1,38 @@
 # Bramble RP2040/RP2350 Emulator - Changelog
 
+## [0.49.0] - 2026-09-03
+
+### Fixed - TinyUSB CDC hello, user IRQs, WFI time fast-forward
+
+- **NVIC user IRQs 26-31** (`include/nvic.h`, `src/nvic.c`): the Pico SDK
+  claims software IRQs top-down from 31 for background tasks (USB
+  `tud_task` pump). The model stopped at 26, so the worker IRQ could never
+  pend or deliver and TinyUSB control transfers never progressed. Arrays
+  extended to 32 with `1u` shifts; covered by
+  `test_nvic_user_irq_pend_deliver`.
+- **Level-triggered USB IRQ** (`src/usb.c`): re-assert USBCTRL_IRQ while
+  sources are unmasked, so firmware enabling interrupts after the event
+  still takes it (previously the first SETUP edge was lost).
+- **WFI/WFE time fast-forward** (`src/timer.c`, `src/cpu.c`): new
+  `timer_next_wakeup_us()` jumps to the next armed alarm (capped 10ms)
+  with matching SysTick advance when all cores sleep. A 1s `sleep_ms`
+  previously needed minutes of wall time.
+- **TinyUSB CDC hello** (`web/hello_usb.uf2`, preset + `test-wasm.js`
+  assert): Pico SDK `hello_usb` prints over USB CDC in Bramble, native and
+  browser. Same code path SagePico uses; its firmware is not available, so
+  SagePico itself stays unverified.
+- **W5500 real internet**: `web/net_proxy.py` dials real TCP/UDP; verified
+  CONNECT + HTTP 200 from example.com through the proxy framing.
+- **Real GDB E2E**: full remote session verified (break main, backtrace,
+  regs, memory, stepi, detach); non-blocking `.github/workflows/test.yml`
+  `gdb-e2e` job added.
+
+### Tests
+
+- 326/326 tests passing (325 + NVIC user-IRQ), no regressions.
+
+---
+
 ## [0.48.0] - 2026-09-03
 
 ### Fixed - MicroPython REPL brings up (USB multi-packet LEN corruption)

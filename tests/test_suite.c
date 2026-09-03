@@ -3431,7 +3431,7 @@ static void test_nvic_iabr_read(void) {
 }
 
 static void test_nvic_ipr7_readwrite(void) {
-    /* IPR7 covers IRQs 24-27 (RP2040 has 26 IRQs: 0-25) */
+    /* IPR7 covers IRQs 24-27 (RP2040 wires 0-25, 26-31 are software user IRQs) */
     nvic_init();
     /* Write priority for IRQ 24 and 25 */
     mem_write32(NVIC_IPR + 24, 0x0000C040);
@@ -3439,6 +3439,27 @@ static void test_nvic_ipr7_readwrite(void) {
     uint32_t ipr7 = mem_read32(NVIC_IPR + 24);
     ASSERT_EQ(0x40, ipr7 & 0xFF, "IPR7 byte 0 = IRQ24 priority 0x40");
     ASSERT_EQ(0xC0, (ipr7 >> 8) & 0xFF, "IPR7 byte 1 = IRQ25 priority 0xC0");
+    PASS();
+}
+
+static void test_nvic_user_irq_pend_deliver(void) {
+    /* User IRQs 26-31 are software-pended via ISPR (Pico SDK claims them
+     * for background tasks, e.g. USB tud_task pumping). They must pend,
+     * report via get_pending, and clear like wired IRQs. */
+    nvic_init();
+    mem_write32(NVIC_ISER, (1u << 31));
+    ASSERT_EQ(0x80000000u, mem_read32(NVIC_ISER) & 0x80000000u,
+              "ISER bit 31 (user IRQ) must stick");
+    mem_write32(NVIC_ISPR, (1u << 31));
+    ASSERT_EQ(31u, nvic_get_pending_irq(), "Pending user IRQ 31 must be reported");
+    mem_write32(NVIC_ICPR, (1u << 31));
+    ASSERT_EQ(0xFFFFFFFFu, nvic_get_pending_irq(), "Cleared IRQ must not report");
+    nvic_set_priority(31, 0xC0);
+    mem_write32(NVIC_ISER, (1u << 31) | (1u << 3));
+    mem_write32(NVIC_ISPR, (1u << 31) | (1u << 3));
+    ASSERT_EQ(3u, nvic_get_pending_irq(), "Lower IRQ number wins at equal priority");
+    mem_write32(NVIC_ICPR, (1u << 3));
+    ASSERT_EQ(31u, nvic_get_pending_irq(), "IRQ 31 still pending after IRQ 3 cleared");
     PASS();
 }
 
@@ -5258,6 +5279,7 @@ int main(void) {
     RUN_TEST(test_cpuid_register);
     RUN_TEST(test_nvic_iabr_read);
     RUN_TEST(test_nvic_ipr7_readwrite);
+    RUN_TEST(test_nvic_user_irq_pend_deliver);
     END_CATEGORY("CPUID and NVIC Extensions");
 
     BEGIN_CATEGORY("RTC Ticking");
