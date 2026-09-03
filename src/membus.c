@@ -715,9 +715,13 @@ static uint32_t interp_lane_result(interp_state_t *interp, int lane) {
         }
         val &= mask;
 
-        /* Sign extension from mask_msb */
-        if (sign_ext && (val & (1u << mask_msb))) {
-            val |= ~((1u << (mask_msb + 1)) - 1);
+        /* Sign extension from mask_msb (C3: avoid 1u<<32 UB) */
+        if (sign_ext && (val & (mask_msb >= 32 ? 0u : (1u << mask_msb)))) {
+            if (mask_msb >= 31) {
+                /* bit31 set + sign-extend = no change (all upper bits already) */
+            } else {
+                val |= ~((1u << (mask_msb + 1)) - 1);
+            }
         }
     }
 
@@ -1442,9 +1446,14 @@ void mem_write16(uint32_t addr, uint16_t val) {
         return;
     }
 
-    /* GPIO */
+    /* GPIO (H7: read-modify-write for subword, don't clobber) */
     if (gpio_bus_match(addr)) {
-        gpio_write32(addr & ~0x3, val);
+        uint32_t a32 = addr & ~0x3u;
+        uint32_t cur = gpio_read32(a32);
+        uint32_t bo = addr & 0x2u;  /* 0 or 2 */
+        uint32_t mask = 0xFFFFu << (bo * 8u);
+        uint32_t new_val = (cur & ~mask) | ((uint32_t)val << (bo * 8u));
+        gpio_write32(a32, new_val);
         return;
     }
 
@@ -1497,9 +1506,14 @@ void mem_write8(uint32_t addr, uint8_t val) {
         return;
     }
 
-    /* GPIO */
+    /* GPIO (H7: read-modify-write for byte) */
     if (gpio_bus_match(addr)) {
-        gpio_write32(addr & ~0x3, val);
+        uint32_t a32 = addr & ~0x3u;
+        uint32_t cur = gpio_read32(a32);
+        uint32_t bo = addr & 0x3u;
+        uint32_t mask8 = 0xFFu << (bo * 8u);
+        uint32_t new_val = (cur & ~mask8) | ((uint32_t)val << (bo * 8u));
+        gpio_write32(a32, new_val);
         return;
     }
 
@@ -1787,10 +1801,11 @@ uint16_t mem_read16(uint32_t addr) {
         return (uint16_t)((val32 >> (offset * 8)) & 0xFFFF);
     }
 
-    /* GPIO */
+    /* GPIO (H8: respect halfword offset) */
     if (gpio_bus_match(addr)) {
-        uint32_t val32 = gpio_read32(addr & ~0x3);
-        return (uint16_t)(val32 & 0xFFFF);
+        uint32_t val32 = gpio_read32(addr & ~0x3u);
+        uint32_t bo = addr & 0x2u;
+        return (uint16_t)((val32 >> (bo * 8u)) & 0xFFFFu);
     }
 
     /* USB DPRAM/registers */
@@ -1870,6 +1885,8 @@ void mem_write32_dual(int core_id, uint32_t addr, uint32_t val) {
     if (addr >= active_ram_base && addr < active_ram_base + active_ram_size) {
         uint32_t offset = addr - active_ram_base;
         memcpy(&get_ram()[offset], &val, 4);
+        icache_invalidate_addr(addr);
+        jit_invalidate_addr(addr);
         return;
     }
 

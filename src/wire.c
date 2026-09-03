@@ -388,21 +388,22 @@ void wire_send_eth_frame(const uint8_t *frame, int len) {
         if (l->type != WIRE_MSG_ETH_FRAME || l->state != WIRE_CONNECTED) continue;
         if (l->peer_fd < 0) continue;
 
-        /* Extended framing: 4-byte header + 2-byte LE length + frame */
-        wire_msg_t msg = { .type = WIRE_MSG_ETH_FRAME, .channel = 0, .len = 0, .reserved = 0 };
-        uint8_t hdr[sizeof(wire_msg_t) + 2];
-        memcpy(hdr, &msg, sizeof(msg));
-        hdr[sizeof(msg)]     = (uint8_t)(len & 0xFF);
-        hdr[sizeof(msg) + 1] = (uint8_t)((len >> 8) & 0xFF);
-
-        /* Write header + frame (best-effort, non-blocking) */
-        ssize_t n = write(l->peer_fd, hdr, sizeof(hdr));
-        if (n == (ssize_t)sizeof(hdr)) {
-            write(l->peer_fd, frame, (size_t)len);
-        } else if (n < 0 && errno != EAGAIN && errno != EWOULDBLOCK) {
-            fprintf(stderr, "[Wire] %s: ETH write error\n", l->path);
-            wire_disconnect_peer(l);
+        /* Extended framing via tx_buf (M12: don't bypass buffering) */
+        size_t total = sizeof(wire_msg_t) + 2 + (size_t)len;
+        wire_flush_tx(l);
+        if (l->state != WIRE_CONNECTED) continue;
+        if (total > sizeof(l->tx_buf) - l->tx_len) {
+            fprintf(stderr, "[Wire] %s: ETH tx full, dropping frame\n", l->path);
+            continue;
         }
+        wire_msg_t msg = { .type = WIRE_MSG_ETH_FRAME, .channel = 0, .len = 0, .reserved = 0 };
+        memcpy(l->tx_buf + l->tx_len, &msg, sizeof(msg));
+        l->tx_len += sizeof(msg);
+        l->tx_buf[l->tx_len++] = (uint8_t)(len & 0xFF);
+        l->tx_buf[l->tx_len++] = (uint8_t)((len >> 8) & 0xFF);
+        memcpy(l->tx_buf + l->tx_len, frame, (size_t)len);
+        l->tx_len += (size_t)len;
+        wire_flush_tx(l);
     }
 }
 

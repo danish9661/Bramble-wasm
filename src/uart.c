@@ -193,7 +193,9 @@ void uart_write32(int uart_num, uint32_t offset, uint32_t val) {
                 wire_send_uart(uart_num, ch);
             } else if (!usb_cdc_stdout_enabled) {
                 putchar((char)ch);
-                fflush(stdout);
+                /* H11: batch flushes - only on newline or every 64 bytes */
+                static int uart_flush_ctr = 0;
+                if (ch == '\n' || (++uart_flush_ctr & 63) == 0) fflush(stdout);
             }
         }
         break;

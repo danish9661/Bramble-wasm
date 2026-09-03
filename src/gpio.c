@@ -40,13 +40,16 @@ void gpio_reset(void) {
     gpio_state.gpio_in = 0x00000000;
 }
 
-/* Recompute INTS and signal NVIC if any interrupt is active */
+/* Recompute INTS and signal NVIC if any interrupt is active.
+ * Covers all 6 banks (48 pins) and both cores' enable masks. */
 static void gpio_check_irq(void) {
     uint32_t any_active = 0;
-    for (int i = 0; i < 4; i++) {
+    for (int i = 0; i < 6; i++) {
         gpio_state.proc0_ints[i] = (gpio_state.intr[i] | gpio_state.proc0_intf[i])
                                     & gpio_state.proc0_inte[i];
-        any_active |= gpio_state.proc0_ints[i];
+        gpio_state.proc1_ints[i] = (gpio_state.intr[i] | gpio_state.proc1_intf[i])
+                                    & gpio_state.proc1_inte[i];
+        any_active |= gpio_state.proc0_ints[i] | gpio_state.proc1_ints[i];
     }
     if (any_active) {
         nvic_signal_irq(IRQ_IO_IRQ_BANK0);
@@ -60,8 +63,8 @@ static void gpio_check_irq(void) {
  * Edge interrupts are latched (W1C) when a transition occurs.
  */
 static void gpio_detect_events(uint32_t old_pins, uint32_t new_pins) {
-    /* Recompute level interrupts from current pin state */
-    for (int reg = 0; reg < 4; reg++) {
+    /* Recompute level interrupts from current pin state (all 6 banks) */
+    for (int reg = 0; reg < 6; reg++) {
         uint32_t level_bits = 0;
         for (int bit = 0; bit < 8; bit++) {
             int pin = reg * 8 + bit;
@@ -83,15 +86,16 @@ static void gpio_detect_events(uint32_t old_pins, uint32_t new_pins) {
         gpio_state.intr[reg] = (gpio_state.intr[reg] & edge_mask) | level_bits;
     }
 
-    /* Detect edges from changed pins */
+    /* Detect edges from changed pins (iterate only set bits, safe for 0-31) */
     uint32_t changed = old_pins ^ new_pins;
-    if (changed) {
-        for (int pin = 0; pin < NUM_GPIO_PINS; pin++) {
-            if (!(changed & (1u << pin))) continue;
+    while (changed) {
+        int pin = __builtin_ctz(changed);
+        changed &= changed - 1;
+        {
             int reg = pin / 8;
             int bit = pin % 8;
-            uint32_t shift = bit * 4;
-            int new_val = (new_pins >> pin) & 1;
+            uint32_t shift = (uint32_t)bit * 4u;
+            int new_val = (int)((new_pins >> (uint32_t)pin) & 1u);
             if (new_val) {
                 /* Rising edge */
                 gpio_state.intr[reg] |= (GPIO_INTR_EDGE_HIGH << shift);
@@ -135,26 +139,23 @@ uint32_t gpio_read32(uint32_t addr) {
                 return gpio_state.gpio_oe;
 
             default:
+                /* RP2350 high GPIO (pins 32-47) at SIO+0x30-0x4C */
+                if (addr >= SIO_BASE_GPIO + 0x30 && addr < SIO_BASE_GPIO + 0x50) {
+                    uint32_t off = addr - (SIO_BASE_GPIO + 0x30);
+                    if (off == 0x00) /* GPIO_HI_OUT */
+                        return gpio_state.gpio_out_hi & 0xFFFFu;
+                    if (off == 0x04) /* GPIO_HI_OE */
+                        return gpio_state.gpio_oe_hi & 0xFFFFu;
+                    if (off == 0x08) /* GPIO_HI_IN */
+                        return ((gpio_state.gpio_out_hi & gpio_state.gpio_oe_hi) |
+                                (gpio_state.gpio_in_hi & ~gpio_state.gpio_oe_hi)) & 0xFFFFu;
+                }
                 return 0x00000000;
         }
     }
 
-    /* IO_BANK0 registers (per-pin configuration) */
-    if (addr >= IO_BANK0_BASE && addr < IO_BANK0_BASE + 0x200) {
-        uint32_t offset = addr - IO_BANK0_BASE;
-        uint32_t pin = offset / 8;  /* Each pin has 8 bytes (STATUS + CTRL) */
-        uint32_t reg = offset % 8;
-
-        if (pin < NUM_GPIO_PINS) {
-            if (reg == GPIO_STATUS_OFFSET) {
-                return gpio_state.pins[pin].status;
-            } else if (reg == GPIO_CTRL_OFFSET) {
-                return gpio_state.pins[pin].ctrl;
-            }
-        }
-    }
-
-    /* IO_BANK0 interrupt registers (all aliases read the underlying register) */
+    /* IO_BANK0 interrupt registers FIRST (C2 fix: they overlap pin range
+     * for pins >=30, so must take precedence over pin handler) */
     {
         uint32_t base_addr = addr;
         if (addr >= IO_BANK0_BASE + REG_ALIAS_CLR_BITS && addr < IO_BANK0_BASE + REG_ALIAS_CLR_BITS + 0x200)
@@ -166,10 +167,33 @@ uint32_t gpio_read32(uint32_t addr) {
 
         if (base_addr >= IO_BANK0_BASE + 0xF0 && base_addr < IO_BANK0_BASE + 0x180) {
             uint32_t offset = (base_addr - (IO_BANK0_BASE + 0xF0)) / 4;
-            if (offset < 4)                  return gpio_state.intr[offset];
-            else if (offset < 8)             return gpio_state.proc0_inte[offset - 4];
-            else if (offset < 12)            return gpio_state.proc0_intf[offset - 8];
-            else if (offset < 16)            return gpio_state.proc0_ints[offset - 12];
+            if (offset < 6)                  return gpio_state.intr[offset];
+            else if (offset < 12)            return gpio_state.proc0_inte[offset - 6];
+            else if (offset < 18)            return gpio_state.proc0_intf[offset - 12];
+            else if (offset < 24)            return gpio_state.proc0_ints[offset - 18];
+        }
+        /* PROC1 registers at 0x130-0x17F (RP2040 compat) + extended */
+        if (base_addr >= IO_BANK0_BASE + 0x130 && base_addr < IO_BANK0_BASE + 0x190) {
+            uint32_t offset = (base_addr - (IO_BANK0_BASE + 0x130)) / 4;
+            if (offset < 6)                  return gpio_state.proc1_inte[offset];
+            else if (offset < 12)            return gpio_state.proc1_intf[offset - 6];
+            else if (offset < 18)            return gpio_state.proc1_ints[offset - 12];
+        }
+    }
+
+    /* IO_BANK0 registers (per-pin configuration, only offsets <0xF0 to
+     * avoid shadowing INTR registers for pins >=30) */
+    if (addr >= IO_BANK0_BASE && addr < IO_BANK0_BASE + 0xF0) {
+        uint32_t offset = addr - IO_BANK0_BASE;
+        uint32_t pin = offset / 8;  /* Each pin has 8 bytes (STATUS + CTRL) */
+        uint32_t reg = offset % 8;
+
+        if (pin < NUM_GPIO_PINS) {
+            if (reg == GPIO_STATUS_OFFSET) {
+                return gpio_state.pins[pin].status;
+            } else if (reg == GPIO_CTRL_OFFSET) {
+                return gpio_state.pins[pin].ctrl;
+            }
         }
     }
 
@@ -206,6 +230,8 @@ void gpio_write32(uint32_t addr, uint32_t val) {
     /* SIO GPIO registers (fast access with atomic operations) */
     if (addr >= SIO_BASE_GPIO && addr < SIO_BASE_GPIO + 0x100) {
         uint32_t old_pins = gpio_effective_pins();
+        uint32_t old_hi = (gpio_state.gpio_out_hi & gpio_state.gpio_oe_hi) |
+                          (gpio_state.gpio_in_hi & ~gpio_state.gpio_oe_hi);
         switch (addr) {
             case SIO_GPIO_OUT: {
                 uint32_t old = gpio_state.gpio_out;
@@ -251,35 +277,62 @@ void gpio_write32(uint32_t addr, uint32_t val) {
             /* GPIO_IN is read-only, writes ignored */
             case SIO_GPIO_IN:
                 break;
+            default: {
+                /* RP2350 high pins 32-47 */
+                if (addr >= SIO_BASE_GPIO + 0x30 && addr < SIO_BASE_GPIO + 0x50) {
+                    uint32_t off = addr - (SIO_BASE_GPIO + 0x30);
+                    uint32_t m = val & 0xFFFFu;
+                    if (off == 0x00) gpio_state.gpio_out_hi = (gpio_state.gpio_out_hi & ~0xFFFFu) | m;
+                    else if (off == 0x04) { /* HI_OUT_SET */
+                        gpio_state.gpio_out_hi |= m;
+                    } else if (off == 0x08) { /* HI_OUT_CLR */
+                        gpio_state.gpio_out_hi &= ~m;
+                    } else if (off == 0x0C) { /* HI_OUT_XOR */
+                        gpio_state.gpio_out_hi ^= m;
+                    } else if (off == 0x10) { /* HI_OE */
+                        gpio_state.gpio_oe_hi = (gpio_state.gpio_oe_hi & ~0xFFFFu) | m;
+                    } else if (off == 0x14) { /* HI_OE_SET */
+                        gpio_state.gpio_oe_hi |= m;
+                    } else if (off == 0x18) { /* HI_OE_CLR */
+                        gpio_state.gpio_oe_hi &= ~m;
+                    } else if (off == 0x1C) { /* HI_OE_XOR */
+                        gpio_state.gpio_oe_hi ^= m;
+                    }
+                    /* edge detect for hi pins into intr[4..5] */
+                    {
+                        uint32_t new_hi = (gpio_state.gpio_out_hi & gpio_state.gpio_oe_hi) |
+                                          (gpio_state.gpio_in_hi & ~gpio_state.gpio_oe_hi);
+                        uint32_t chg = old_hi ^ new_hi;
+                        while (chg) {
+                            int b = __builtin_ctz(chg);
+                            chg &= chg - 1;
+                            int pin = 32 + b;
+                            int reg = pin / 8;
+                            int bit = pin % 8;
+                            uint32_t shift = (uint32_t)bit * 4u;
+                            if ((new_hi >> (uint32_t)b) & 1u)
+                                gpio_state.intr[reg] |= (GPIO_INTR_EDGE_HIGH << shift);
+                            else
+                                gpio_state.intr[reg] |= (GPIO_INTR_EDGE_LOW << shift);
+                            /* recompute level bits for this bank */
+                            gpio_state.intr[reg] &= ~((0x3u) << shift);
+                            if ((new_hi >> (uint32_t)b) & 1u)
+                                gpio_state.intr[reg] |= (GPIO_INTR_LEVEL_HIGH << shift);
+                            else
+                                gpio_state.intr[reg] |= (GPIO_INTR_LEVEL_LOW << shift);
+                        }
+                        if (old_hi != new_hi) gpio_check_irq();
+                    }
+                }
+                break;
+            }
         }
         /* Detect edge/level events from pin value changes */
         gpio_detect_events(old_pins, gpio_effective_pins());
         return;
     }
 
-    /* IO_BANK0 registers (per-pin configuration) */
-    if (addr >= IO_BANK0_BASE && addr < IO_BANK0_BASE + 0x200) {
-        uint32_t offset = addr - IO_BANK0_BASE;
-        uint32_t pin = offset / 8;
-        uint32_t reg = offset % 8;
-
-        if (pin < NUM_GPIO_PINS) {
-            if (reg == GPIO_STATUS_OFFSET) {
-                /* STATUS register - mostly read-only, but some bits writable */
-                /* For now, treat as mostly read-only */
-                gpio_state.pins[pin].status = val;
-            } else if (reg == GPIO_CTRL_OFFSET) {
-                /* CTRL register - function select and other config */
-                gpio_state.pins[pin].ctrl = val & 0x1F;  /* Only lower 5 bits for function */
-            }
-        }
-        return;
-    }
-
-    /* IO_BANK0 interrupt registers with atomic alias support.
-     * Aliases at IO_BANK0_BASE + 0x1000 (XOR), +0x2000 (SET), +0x3000 (CLR).
-     * Firmware uses hw_set_bits/hw_clear_bits (SET/CLR aliases) to enable/disable
-     * GPIO interrupts, so we must handle all four alias regions. */
+    /* IO_BANK0 interrupt registers FIRST (C2 fix) */
     {
         uint32_t irq_alias = REG_ALIAS_RW_BITS;
         uint32_t base_addr = addr;
@@ -297,17 +350,19 @@ void gpio_write32(uint32_t addr, uint32_t val) {
             base_addr -= REG_ALIAS_XOR_BITS;
         }
 
-        if (base_addr >= IO_BANK0_BASE + 0xF0 && base_addr < IO_BANK0_BASE + 0x180) {
+        if (base_addr >= IO_BANK0_BASE + 0xF0 && base_addr < IO_BANK0_BASE + 0x150) {
             uint32_t offset = (base_addr - (IO_BANK0_BASE + 0xF0)) / 4;
             uint32_t *reg_ptr = NULL;
 
-            if (offset < 4) {
+            if (offset < 6) {
                 /* INTR - W1C regardless of alias */
                 gpio_state.intr[offset] &= ~val;
-            } else if (offset >= 4 && offset < 8) {
-                reg_ptr = &gpio_state.proc0_inte[offset - 4];
-            } else if (offset >= 8 && offset < 12) {
-                reg_ptr = &gpio_state.proc0_intf[offset - 8];
+                /* level bits are recomputed on next event; clear only edge bits here
+                 * but W1C clears whatever bits are written */
+            } else if (offset >= 6 && offset < 12) {
+                reg_ptr = &gpio_state.proc0_inte[offset - 6];
+            } else if (offset >= 12 && offset < 18) {
+                reg_ptr = &gpio_state.proc0_intf[offset - 12];
             }
             /* INTS is read-only */
 
@@ -322,6 +377,41 @@ void gpio_write32(uint32_t addr, uint32_t val) {
             gpio_check_irq();
             return;
         }
+        if (base_addr >= IO_BANK0_BASE + 0x130 && base_addr < IO_BANK0_BASE + 0x190) {
+            uint32_t offset = (base_addr - (IO_BANK0_BASE + 0x130)) / 4;
+            uint32_t *reg_ptr = NULL;
+            if (offset < 6) reg_ptr = &gpio_state.proc1_inte[offset];
+            else if (offset < 12) reg_ptr = &gpio_state.proc1_intf[offset - 6];
+            /* proc1_ints read-only */
+            if (reg_ptr) {
+                switch (irq_alias) {
+                case REG_ALIAS_SET_BITS: *reg_ptr |= val;  break;
+                case REG_ALIAS_CLR_BITS: *reg_ptr &= ~val; break;
+                case REG_ALIAS_XOR_BITS: *reg_ptr ^= val;  break;
+                default:                 *reg_ptr  = val;  break;
+                }
+            }
+            gpio_check_irq();
+            return;
+        }
+    }
+
+    /* IO_BANK0 registers (per-pin configuration, only <0xF0) */
+    if (addr >= IO_BANK0_BASE && addr < IO_BANK0_BASE + 0xF0) {
+        uint32_t offset = addr - IO_BANK0_BASE;
+        uint32_t pin = offset / 8;
+        uint32_t reg = offset % 8;
+
+        if (pin < NUM_GPIO_PINS) {
+            if (reg == GPIO_STATUS_OFFSET) {
+                /* STATUS is read-only on hardware; ignore writes */
+                (void)val;
+            } else if (reg == GPIO_CTRL_OFFSET) {
+                /* Store full CTRL (FUNCSEL + overrides) */
+                gpio_state.pins[pin].ctrl = val;
+            }
+        }
+        return;
     }
 
     /* ===== CRITICAL FIX: PADS_BANK0 with Alias Support ===== */
@@ -379,46 +469,113 @@ void gpio_write32(uint32_t addr, uint32_t val) {
 
 void gpio_set_pin(uint8_t pin, uint8_t value) {
     if (pin >= NUM_GPIO_PINS) return;
-
-    uint32_t old_pins = gpio_effective_pins();
-    if (value) {
-        gpio_state.gpio_out |= (1u << pin);
+    if (pin < 32) {
+        uint32_t old_pins = gpio_effective_pins();
+        uint32_t mask = 1u << (uint32_t)pin;
+        if (value) {
+            gpio_state.gpio_out |= mask;
+        } else {
+            gpio_state.gpio_out &= ~mask;
+        }
+        gpio_detect_events(old_pins, gpio_effective_pins());
     } else {
-        gpio_state.gpio_out &= ~(1u << pin);
+        uint32_t b = (uint32_t)pin - 32u;
+        uint32_t mask = 1u << b;
+        uint32_t old_hi = (gpio_state.gpio_out_hi & gpio_state.gpio_oe_hi) |
+                          (gpio_state.gpio_in_hi & ~gpio_state.gpio_oe_hi);
+        if (value) gpio_state.gpio_out_hi |= mask;
+        else gpio_state.gpio_out_hi &= ~mask;
+        uint32_t new_hi = (gpio_state.gpio_out_hi & gpio_state.gpio_oe_hi) |
+                          (gpio_state.gpio_in_hi & ~gpio_state.gpio_oe_hi);
+        /* reuse hi edge logic via direct intr update */
+        uint32_t chg = old_hi ^ new_hi;
+        while (chg) {
+            int bb = __builtin_ctz(chg);
+            chg &= chg - 1;
+            int p = 32 + bb;
+            int reg = p / 8;
+            int bit = p % 8;
+            uint32_t shift = (uint32_t)bit * 4u;
+            if ((new_hi >> (uint32_t)bb) & 1u)
+                gpio_state.intr[reg] |= (GPIO_INTR_EDGE_HIGH << shift);
+            else
+                gpio_state.intr[reg] |= (GPIO_INTR_EDGE_LOW << shift);
+        }
+        gpio_check_irq();
     }
-    gpio_detect_events(old_pins, gpio_effective_pins());
 }
 
 uint8_t gpio_get_pin(uint8_t pin) {
     if (pin >= NUM_GPIO_PINS) return 0;
-
-    /* If pin is output, return output value */
-    if (gpio_state.gpio_oe & (1 << pin)) {
-        return (gpio_state.gpio_out >> pin) & 1;
+    if (pin < 32) {
+        /* If pin is output, return output value (C4: use 1u) */
+        if (gpio_state.gpio_oe & (1u << (uint32_t)pin)) {
+            return (uint8_t)((gpio_state.gpio_out >> (uint32_t)pin) & 1u);
+        }
+        /* Otherwise return input value */
+        return (uint8_t)((gpio_state.gpio_in >> (uint32_t)pin) & 1u);
+    } else {
+        uint32_t b = (uint32_t)pin - 32u;
+        if (gpio_state.gpio_oe_hi & (1u << b)) {
+            return (uint8_t)((gpio_state.gpio_out_hi >> b) & 1u);
+        }
+        return (uint8_t)((gpio_state.gpio_in_hi >> b) & 1u);
     }
-    /* Otherwise return input value */
-    return (gpio_state.gpio_in >> pin) & 1;
 }
 
 void gpio_set_input_pin(uint8_t pin, uint8_t value) {
     if (pin >= NUM_GPIO_PINS) return;
-
-    uint32_t old_pins = gpio_effective_pins();
-    if (value) {
-        gpio_state.gpio_in |= (1u << pin);
+    if (pin < 32) {
+        uint32_t old_pins = gpio_effective_pins();
+        uint32_t mask = 1u << (uint32_t)pin;
+        if (value) {
+            gpio_state.gpio_in |= mask;
+        } else {
+            gpio_state.gpio_in &= ~mask;
+        }
+        gpio_detect_events(old_pins, gpio_effective_pins());
     } else {
-        gpio_state.gpio_in &= ~(1u << pin);
+        uint32_t b = (uint32_t)pin - 32u;
+        uint32_t mask = 1u << b;
+        uint32_t old_hi = (gpio_state.gpio_out_hi & gpio_state.gpio_oe_hi) |
+                          (gpio_state.gpio_in_hi & ~gpio_state.gpio_oe_hi);
+        if (value) gpio_state.gpio_in_hi |= mask;
+        else gpio_state.gpio_in_hi &= ~mask;
+        uint32_t new_hi = (gpio_state.gpio_out_hi & gpio_state.gpio_oe_hi) |
+                          (gpio_state.gpio_in_hi & ~gpio_state.gpio_oe_hi);
+        uint32_t chg = old_hi ^ new_hi;
+        while (chg) {
+            int bb = __builtin_ctz(chg);
+            chg &= chg - 1;
+            int p = 32 + bb;
+            int reg = p / 8;
+            int bit = p % 8;
+            uint32_t shift = (uint32_t)bit * 4u;
+            if ((new_hi >> (uint32_t)bb) & 1u)
+                gpio_state.intr[reg] |= (GPIO_INTR_EDGE_HIGH << shift);
+            else
+                gpio_state.intr[reg] |= (GPIO_INTR_EDGE_LOW << shift);
+        }
+        gpio_check_irq();
     }
-    gpio_detect_events(old_pins, gpio_effective_pins());
 }
 
 void gpio_set_direction(uint8_t pin, uint8_t output) {
     if (pin >= NUM_GPIO_PINS) return;
-
-    if (output) {
-        gpio_state.gpio_oe |= (1 << pin);
+    if (pin < 32) {
+        uint32_t mask = 1u << (uint32_t)pin;
+        if (output) {
+            gpio_state.gpio_oe |= mask;
+        } else {
+            gpio_state.gpio_oe &= ~mask;
+        }
     } else {
-        gpio_state.gpio_oe &= ~(1 << pin);
+        uint32_t mask = 1u << ((uint32_t)pin - 32u);
+        if (output) {
+            gpio_state.gpio_oe_hi |= mask;
+        } else {
+            gpio_state.gpio_oe_hi &= ~mask;
+        }
     }
 }
 

@@ -103,6 +103,18 @@ int gdb_should_stop(uint32_t pc, int core_id);
 /* Returns: 0 = continue execution, 1 = single-step, -1 = detach/quit */
 int gdb_handle(void);
 
+#ifdef __EMSCRIPTEN__
+/* WASM WebSocket transport (see src/gdb.c): non-blocking queues */
+void bramble_gdb_push_rx(const uint8_t *data, int len);
+int bramble_gdb_pop_tx(uint8_t *out, int maxlen);
+int bramble_gdb_tx_len(void);
+int bramble_gdb_start(void);
+void bramble_gdb_stop(void);
+void bramble_gdb_notify_stop(void);
+/* Poll one packet while stopped: 0=resume,1=step,2=still stopped,-1=detach */
+int bramble_gdb_poll(void);
+#endif
+
 /* Watchpoint checks - called from membus on every memory access.
  * Return 1 if watchpoint triggered, 0 otherwise.
  * Gated internally: no-op when GDB inactive or no watchpoints set. */

@@ -285,6 +285,15 @@ static inline void d2u(double d, uint32_t *lo, uint32_t *hi) {
     *lo = (uint32_t)bits;
     *hi = (uint32_t)(bits >> 32);
 }
+/* H2: safe 2^n scale without UB for n>=31 (uses ldexp, saturates like HW) */
+static inline float rom_scale_f(uint32_t n) {
+    if (n > 60) n = 60;
+    return ldexpf(1.0f, (int)n);
+}
+static inline double rom_scale_d(uint32_t n) {
+    if (n > 60) n = 60;
+    return ldexp(1.0, (int)n);
+}
 
 static int rom_intercept_float(int idx) {
     float a, b, result;
@@ -316,7 +325,7 @@ static int rom_intercept_float(int idx) {
         return 1;
     case ROM_FLOAT_FLOAT2FIX:
         a = u2f(cpu.r[0]);
-        result = a * (float)(1 << cpu.r[1]);
+        result = a * rom_scale_f(cpu.r[1]);
         cpu.r[0] = (uint32_t)(int32_t)result;
         return 1;
     case ROM_FLOAT_FLOAT2UINT:
@@ -325,20 +334,20 @@ static int rom_intercept_float(int idx) {
         return 1;
     case ROM_FLOAT_FLOAT2UFIX:
         a = u2f(cpu.r[0]);
-        result = a * (float)(1 << cpu.r[1]);
+        result = a * rom_scale_f(cpu.r[1]);
         cpu.r[0] = (result < 0) ? 0 : (uint32_t)result;
         return 1;
     case ROM_FLOAT_INT2FLOAT:
         cpu.r[0] = f2u((float)(int32_t)cpu.r[0]);
         return 1;
     case ROM_FLOAT_FIX2FLOAT:
-        cpu.r[0] = f2u((float)(int32_t)cpu.r[0] / (float)(1 << cpu.r[1]));
+        cpu.r[0] = f2u((float)(int32_t)cpu.r[0] / rom_scale_f(cpu.r[1]));
         return 1;
     case ROM_FLOAT_UINT2FLOAT:
         cpu.r[0] = f2u((float)cpu.r[0]);
         return 1;
     case ROM_FLOAT_UFIX2FLOAT:
-        cpu.r[0] = f2u((float)cpu.r[0] / (float)(1 << cpu.r[1]));
+        cpu.r[0] = f2u((float)cpu.r[0] / rom_scale_f(cpu.r[1]));
         return 1;
     case ROM_FLOAT_FCOS:
         cpu.r[0] = f2u(cosf(u2f(cpu.r[0])));
@@ -390,7 +399,7 @@ static int rom_intercept_double(int idx) {
         return 1;
     case ROM_FLOAT_FLOAT2FIX:
         a = u2d(cpu.r[0], cpu.r[1]);
-        result = a * (double)(1u << cpu.r[2]);
+        result = a * rom_scale_d(cpu.r[2]);
         cpu.r[0] = (uint32_t)(int32_t)result;
         return 1;
     case ROM_FLOAT_FLOAT2UINT:
@@ -399,21 +408,21 @@ static int rom_intercept_double(int idx) {
         return 1;
     case ROM_FLOAT_FLOAT2UFIX:
         a = u2d(cpu.r[0], cpu.r[1]);
-        result = a * (double)(1u << cpu.r[2]);
+        result = a * rom_scale_d(cpu.r[2]);
         cpu.r[0] = (result < 0) ? 0 : (uint32_t)result;
         return 1;
     case ROM_FLOAT_INT2FLOAT:
         d2u((double)(int32_t)cpu.r[0], &cpu.r[0], &cpu.r[1]);
         return 1;
     case ROM_FLOAT_FIX2FLOAT:
-        d2u((double)(int32_t)cpu.r[0] / (double)(1u << cpu.r[1]),
+        d2u((double)(int32_t)cpu.r[0] / rom_scale_d(cpu.r[1]),
             &cpu.r[0], &cpu.r[1]);
         return 1;
     case ROM_FLOAT_UINT2FLOAT:
         d2u((double)cpu.r[0], &cpu.r[0], &cpu.r[1]);
         return 1;
     case ROM_FLOAT_UFIX2FLOAT:
-        d2u((double)cpu.r[0] / (double)(1u << cpu.r[1]),
+        d2u((double)cpu.r[0] / rom_scale_d(cpu.r[1]),
             &cpu.r[0], &cpu.r[1]);
         return 1;
     case ROM_FLOAT_FCOS:
@@ -440,7 +449,7 @@ static int rom_intercept_flash(uint32_t pc) {
     if (pc == ROM_FLASH_RANGE_ERASE_ADDR) {
         uint32_t offs = cpu.r[0];
         uint32_t count = cpu.r[1];
-        if (offs + count <= FLASH_SIZE) {
+        if (offs < FLASH_SIZE_MAX && count <= FLASH_SIZE_MAX - offs) {
             pthread_mutex_lock(&fuse_flash_mutex);
             memset(&cpu.flash[offs], 0xFF, count);
             flash_persist_sync(offs, count);
@@ -453,7 +462,7 @@ static int rom_intercept_flash(uint32_t pc) {
         uint32_t offs = cpu.r[0];
         uint32_t src = cpu.r[1];
         uint32_t count = cpu.r[2];
-        if (offs + count <= FLASH_SIZE) {
+        if (offs < FLASH_SIZE_MAX && count <= FLASH_SIZE_MAX - offs) {
             pthread_mutex_lock(&fuse_flash_mutex);
             for (uint32_t i = 0; i < count; i++) {
                 cpu.flash[offs + i] = mem_read8(src + i);
@@ -500,8 +509,8 @@ int rom_intercept(uint32_t pc) {
         }
     }
 
-    /* RP2350 get_sys_info ('GS') stub at 0x0750 */
-    if (membus_rp2350_mode && pc == 0x0750) {
+    /* RP2350 get_sys_info ('GS') stub at 0x07C8 (new) / 0x0750 (legacy) */
+    if (membus_rp2350_mode && (pc == 0x07C8 || pc == 0x0750)) {
         /* r0 = out_addr, r1 = out_words, r2 = flags
          * Write minimal chip info to out_addr */
         uint32_t out_addr = cpu.r[0];
@@ -538,8 +547,8 @@ int rom_intercept(uint32_t pc) {
         return 1;
     }
 
-    /* RP2350 reboot ('RB') stub at 0x0752 */
-    if (membus_rp2350_mode && pc == 0x0752) {
+    /* RP2350 reboot ('RB') stub at 0x07CA (new) / 0x0752 (legacy) */
+    if (membus_rp2350_mode && (pc == 0x07CA || pc == 0x0752)) {
         /* Reboot not implemented; trigger semihosting exit */
         semihost_exit_requested = 1;
         semihost_exit_code = 0;
@@ -632,16 +641,16 @@ void rom_patch_rp2350_arm(void) {
     RP2350_ADD_FUNC(t, ROM_FUNC_FLASH_RANGE_PROGRAM,    0x03BD); t += 8;
     RP2350_ADD_FUNC(t, ROM_FUNC_FLASH_FLUSH_CACHE,      0x03C1); t += 8;
     RP2350_ADD_FUNC(t, ROM_FUNC_FLASH_ENTER_CMD_XIP,    0x03C5); t += 8;
-    RP2350_ADD_FUNC(t, 0x5347 /* GS */, 0x0751); t += 8;
-    RP2350_ADD_FUNC(t, 0x5242 /* RB */, 0x0753); t += 8;
+    RP2350_ADD_FUNC(t, 0x5347 /* GS */, 0x07C9); t += 8;
+    RP2350_ADD_FUNC(t, 0x5242 /* RB */, 0x07CB); t += 8;
     /* End marker */
     rom_write16(t,     0x0000); rom_write16(t+2, 0x0000);
     rom_write16(t+4,   0x0000); rom_write16(t+6, 0x0000);
     #undef RP2350_ADD_FUNC
 
-    /* Place stub functions: BX LR (intercepted by rom_intercept) */
-    rom_write16(0x0750, 0x4770);  /* bx lr - get_sys_info */
-    rom_write16(0x0752, 0x4770);  /* bx lr - reboot */
+    /* Place stub functions outside table range (C8: was 0x0750/0x0752 inside table) */
+    rom_write16(0x07C8, 0x4770);  /* bx lr - get_sys_info */
+    rom_write16(0x07CA, 0x4770);  /* bx lr - reboot */
 }
 
 /* Read from ROM */

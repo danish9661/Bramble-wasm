@@ -111,6 +111,24 @@ static void usb_complete_ep0_out(uint8_t *data, int len) {
 
 static void usb_ctrl_step(void) {
     uint32_t buf_ctrl;
+    /* SagePico/TinyUSB retry guard: if a control stage stalls (firmware
+     * retrying cdcd_control_xfer_cb), auto-complete after N polls so the
+     * stack doesn't leak via infinite retries. Counter per ctrl_state. */
+    static int ctrl_stall_ctr = 0;
+    static int ctrl_last_state = -1;
+    if ((int)usb_state.ctrl_state != ctrl_last_state) {
+        ctrl_last_state = (int)usb_state.ctrl_state;
+        ctrl_stall_ctr = 0;
+    } else if (usb_state.ctrl_state != USB_CTRL_IDLE &&
+               usb_state.ctrl_state != USB_CTRL_DONE) {
+        if (++ctrl_stall_ctr > 20000) {
+            /* 20k polls (~20ms sim) without firmware progress: force DONE
+             * with empty data so enum state machine can advance. */
+            usb_state.ctrl_state = USB_CTRL_DONE;
+            ctrl_stall_ctr = 0;
+            return;
+        }
+    }
     switch (usb_state.ctrl_state) {
     case USB_CTRL_IDLE:
     case USB_CTRL_DONE:
@@ -322,7 +340,7 @@ static void usb_enum_step(void) {
             /* Read wTotalLength from config descriptor */
             uint8_t *buf = &usb_state.dpram[USB_DPRAM_EP0_BUF];
             usb_state.config_total_len = buf[2] | (buf[3] << 8);
-            if (usb_state.config_total_len > 64) usb_state.config_total_len = 64;
+            if (usb_state.config_total_len > 255) usb_state.config_total_len = 255;
             usb_state.ctrl_state = USB_CTRL_IDLE;
             /* GET_CONFIGURATION_DESCRIPTOR, full length */
             usb_send_setup(0x80, 6, 0x0200, 0, usb_state.config_total_len);
@@ -405,10 +423,21 @@ static void usb_handle_cdc(void) {
              * (i.e. -stdin mode). When UART stdio is also active, UART
              * already handles stdout and we must not duplicate the data. */
             if (usb_cdc_stdout_enabled) {
-                fwrite(&usb_state.dpram[buf_addr], 1, len, stdout);
-                fflush(stdout);
+#ifdef __EMSCRIPTEN__
+                /* WASM: route via putchar so browser serial monitor (uart_tx_buf)
+                 * captures USB CDC too; fwrite would bypass it to console.log. */
+                for (int i = 0; i < len; i++) putchar((int)usb_state.dpram[buf_addr + i]);
+#else
+                fwrite(&usb_state.dpram[buf_addr], 1, (size_t)len, stdout);
+                /* M23: batch flush, not per-write */
+                static int cdc_flush_ctr = 0;
+                if (++cdc_flush_ctr >= 8 || memchr(&usb_state.dpram[buf_addr], '\n', (size_t)len)) {
+                    fflush(stdout);
+                    cdc_flush_ctr = 0;
+                }
+#endif
                 if (__builtin_expect(expect_enabled, 0))
-                    expect_append((const char *)&usb_state.dpram[buf_addr], len);
+                    expect_append((const char *)&usb_state.dpram[buf_addr], (size_t)len);
             }
         }
 
@@ -589,10 +618,11 @@ void usb_write32(uint32_t addr, uint32_t val) {
     uint32_t base = addr & ~0x3000;
     uint32_t alias = (addr >> 12) & 0x3;
 
-    /* DPRAM writes (no alias for DPRAM) */
+    /* DPRAM writes (no alias for DPRAM) (H19: guard unaligned overflow) */
     if (base >= USBCTRL_DPRAM_BASE && base < USBCTRL_DPRAM_BASE + USBCTRL_DPRAM_SIZE) {
         usb_state.dpram_touched = 1;
         uint32_t off = base - USBCTRL_DPRAM_BASE;
+        if (off + 4 > USBCTRL_DPRAM_SIZE) return;
         if (alias == 0) {
             memcpy(&usb_state.dpram[off], &val, 4);
         } else {

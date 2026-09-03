@@ -607,7 +607,7 @@ void instr_shift_logical_left(uint16_t instr) {
     if (imm == 0) {
         cpu.r[reg_dst] = cpu.r[reg_src];
     } else {
-        if (cpu.r[reg_src] & (1 << (32 - imm))) {
+        if (cpu.r[reg_src] & (1u << (32 - imm))) {
             cpu.xpsr |= FLAG_C;
         } else {
             cpu.xpsr &= ~FLAG_C;
@@ -627,7 +627,7 @@ void instr_shift_logical_right(uint16_t instr) {
         if (cpu.r[reg_src] & 0x80000000) cpu.xpsr |= FLAG_C;
         else cpu.xpsr &= ~FLAG_C;
     } else {
-        if (cpu.r[reg_src] & (1 << (imm - 1))) {
+        if (cpu.r[reg_src] & (1u << (imm - 1))) {
             cpu.xpsr |= FLAG_C;
         } else {
             cpu.xpsr &= ~FLAG_C;
@@ -669,7 +669,7 @@ void instr_lsls_reg(uint16_t instr) {
     if (shift == 0) {
         /* No change */
     } else if (shift < 32) {
-        if (cpu.r[rd] & (1 << (32 - shift))) cpu.xpsr |= FLAG_C;
+        if (cpu.r[rd] & (1u << (32 - shift))) cpu.xpsr |= FLAG_C;
         else cpu.xpsr &= ~FLAG_C;
         cpu.r[rd] <<= shift;
         update_nz_flags_fast(cpu.r[rd]);
@@ -693,7 +693,7 @@ void instr_lsrs_reg(uint16_t instr) {
     if (shift == 0) {
         /* No change */
     } else if (shift < 32) {
-        if (cpu.r[rd] & (1 << (shift - 1))) cpu.xpsr |= FLAG_C;
+        if (cpu.r[rd] & (1u << (shift - 1))) cpu.xpsr |= FLAG_C;
         else cpu.xpsr &= ~FLAG_C;
         cpu.r[rd] >>= shift;
         update_nz_flags_fast(cpu.r[rd]);
@@ -717,7 +717,7 @@ void instr_asrs_reg(uint16_t instr) {
     if (shift == 0) {
         /* No change */
     } else if (shift < 32) {
-        if (cpu.r[rd] & (1 << (shift - 1))) cpu.xpsr |= FLAG_C;
+        if (cpu.r[rd] & (1u << (shift - 1))) cpu.xpsr |= FLAG_C;
         else cpu.xpsr &= ~FLAG_C;
         cpu.r[rd] = ((int32_t)cpu.r[rd]) >> shift;
         update_nz_flags_fast(cpu.r[rd]);

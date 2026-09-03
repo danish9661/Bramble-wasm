@@ -40,6 +40,48 @@
 #include "emulator.h"
 #include "rp2350_rv/rv_cpu.h"
 
+#ifdef __EMSCRIPTEN__
+#include <emscripten.h>
+/* WASM GDB transport queues (JS WebSocket <-> C). Native socket fds unused. */
+#define WASM_GDB_RX_SIZE 16384
+#define WASM_GDB_TX_SIZE 16384
+static uint8_t wasm_gdb_rx[WASM_GDB_RX_SIZE];
+static int wasm_gdb_rx_head = 0, wasm_gdb_rx_tail = 0;
+static uint8_t wasm_gdb_tx[WASM_GDB_TX_SIZE];
+static int wasm_gdb_tx_head = 0, wasm_gdb_tx_tail = 0;
+
+void bramble_gdb_push_rx(const uint8_t *data, int len) {
+    if (!data || len <= 0) return;
+    for (int i = 0; i < len; i++) {
+        int nxt = (wasm_gdb_rx_head + 1) % WASM_GDB_RX_SIZE;
+        if (nxt == wasm_gdb_rx_tail) break; /* drop on overflow */
+        wasm_gdb_rx[wasm_gdb_rx_head] = data[i];
+        wasm_gdb_rx_head = nxt;
+    }
+}
+int bramble_gdb_pop_tx(uint8_t *out, int maxlen) {
+    int n = 0;
+    while (n < maxlen && wasm_gdb_tx_tail != wasm_gdb_tx_head) {
+        out[n++] = wasm_gdb_tx[wasm_gdb_tx_tail];
+        wasm_gdb_tx_tail = (wasm_gdb_tx_tail + 1) % WASM_GDB_TX_SIZE;
+    }
+    return n;
+}
+int bramble_gdb_tx_len(void) {
+    int n = wasm_gdb_tx_head - wasm_gdb_tx_tail;
+    if (n < 0) n += WASM_GDB_TX_SIZE;
+    return n;
+}
+static void wasm_gdb_tx_append(const char *data, int len) {
+    for (int i = 0; i < len; i++) {
+        int nxt = (wasm_gdb_tx_head + 1) % WASM_GDB_TX_SIZE;
+        if (nxt == wasm_gdb_tx_tail) break;
+        wasm_gdb_tx[wasm_gdb_tx_head] = (uint8_t)data[i];
+        wasm_gdb_tx_head = nxt;
+    }
+}
+#endif
+
 /* RISC-V GDB support: external hart state pointers (set by main.c when -arch rv32) */
 rv_cpu_state_t *gdb_rv_harts[2] = { NULL, NULL };
 int gdb_is_riscv = 0;
@@ -125,13 +167,24 @@ static void hex_encode(const char *str, char *out) {
  * ======================================================================== */
 
 static int gdb_send_raw(const char *data, int len) {
+#ifdef __EMSCRIPTEN__
+    /* In browser, queue bytes for JS WebSocket proxy (never blocks) */
+    wasm_gdb_tx_append(data, len);
+    return 0;
+#else
     int sent = 0;
     while (sent < len) {
-        int n = write(gdb.client_fd, data + sent, len - sent);
+        int n;
+#ifdef MSG_NOSIGNAL
+        n = send(gdb.client_fd, data + sent, (size_t)(len - sent), MSG_NOSIGNAL);
+#else
+        n = (int)write(gdb.client_fd, data + sent, (size_t)(len - sent));
+#endif
         if (n <= 0) return -1;
         sent += n;
     }
     return 0;
+#endif
 }
 
 static int gdb_send_packet(const char *data) {
@@ -162,6 +215,80 @@ static void gdb_send_output(const char *msg) {
 }
 
 static int gdb_recv_packet(char *out, int max_len) {
+#ifdef __EMSCRIPTEN__
+    /* Non-blocking: drain queued WebSocket bytes, return 0 if no complete packet yet.
+     * Returns 1 with out[0]=0x03 on Ctrl-C, >0 on packet, 0 on empty, -1 never (no socket). */
+    static char pbuf[8192];
+    static int ptotal = 0;
+    /* Drain RX queue into pbuf */
+    while (wasm_gdb_rx_tail != wasm_gdb_rx_head && ptotal < (int)sizeof(pbuf) - 1) {
+        pbuf[ptotal++] = (char)wasm_gdb_rx[wasm_gdb_rx_tail];
+        wasm_gdb_rx_tail = (wasm_gdb_rx_tail + 1) % WASM_GDB_RX_SIZE;
+    }
+    if (ptotal == 0) return 0;
+    pbuf[ptotal] = '\0';
+    char *start = strchr(pbuf, '$');
+    if (!start) {
+        for (int i = 0; i < ptotal; i++) {
+            if (pbuf[i] == 0x03) {
+                out[0] = 0x03; out[1] = '\0';
+                gdb_send_raw("+", 1);
+                int remain = ptotal - (i + 1);
+                memmove(pbuf, pbuf + i + 1, (size_t)remain);
+                ptotal = remain;
+                return 1;
+            }
+        }
+        /* No start yet: keep '+' acks? GDB may send '+' acks for our packets - ignore */
+        /* Drop leading noise up to last '+'? Keep simple: if buffer full, reset */
+        if (ptotal >= (int)sizeof(pbuf) - 1) ptotal = 0;
+        /* Single '+' ack bytes from client: consume them */
+        int consumed = 0;
+        for (int i = 0; i < ptotal; i++) {
+            if (pbuf[i] == '+' || pbuf[i] == '-') consumed++;
+            else break;
+        }
+        if (consumed > 0) {
+            memmove(pbuf, pbuf + consumed, (size_t)(ptotal - consumed));
+            ptotal -= consumed;
+        }
+        return 0;
+    }
+    /* Discard noise before '$' */
+    if (start != pbuf) {
+        int off = (int)(start - pbuf);
+        memmove(pbuf, start, (size_t)(ptotal - off));
+        ptotal -= off;
+        start = pbuf;
+    }
+    char *end = strchr(start, '#');
+    if (end && (end - pbuf + 2) < ptotal) {
+        int data_len = (int)(end - start - 1);
+        if (data_len >= max_len) data_len = max_len - 1;
+        {
+            unsigned int recv_cs = 0;
+            char cs_hex[3] = { end[1], end[2], '\0' };
+            recv_cs = (unsigned int)strtoul(cs_hex, NULL, 16);
+            unsigned int calc = 0;
+            for (char *p = start + 1; p < end; p++) calc = (calc + (uint8_t)*p) & 0xFFu;
+            if (calc != recv_cs) {
+                gdb_send_raw("-", 1);
+                size_t remain = (size_t)ptotal - (size_t)(end - pbuf + 3);
+                memmove(pbuf, end + 3, remain);
+                ptotal = (int)remain;
+                return 0;
+            }
+        }
+        memcpy(out, start + 1, (size_t)data_len);
+        out[data_len] = '\0';
+        gdb_send_raw("+", 1);
+        size_t remain = (size_t)ptotal - (size_t)(end - pbuf + 3);
+        memmove(pbuf, end + 3, remain);
+        ptotal = (int)remain;
+        return data_len;
+    }
+    return 0;
+#else
     char buf[8192];
     int total = 0;
 
@@ -187,14 +314,31 @@ static int gdb_recv_packet(char *out, int max_len) {
 
         char *end = strchr(start, '#');
         if (end && (end - buf + 2) < total) {
-            int data_len = end - start - 1;
+            int data_len = (int)(end - start - 1);
             if (data_len >= max_len) data_len = max_len - 1;
-            memcpy(out, start + 1, data_len);
+            /* H14: validate checksum, NAK on mismatch */
+            {
+                unsigned int recv_cs = 0;
+                char cs_hex[3] = { end[1], end[2], '\0' };
+                recv_cs = (unsigned int)strtoul(cs_hex, NULL, 16);
+                unsigned int calc = 0;
+                for (char *p = start + 1; p < end; p++) calc = (calc + (uint8_t)*p) & 0xFFu;
+                if (calc != recv_cs) {
+                    gdb_send_raw("-", 1);
+                    /* drop this packet bytes and keep reading */
+                    size_t remain = (size_t)total - (size_t)(end - buf + 3);
+                    memmove(buf, end + 3, remain);
+                    total = (int)remain;
+                    continue;
+                }
+            }
+            memcpy(out, start + 1, (size_t)data_len);
             out[data_len] = '\0';
             gdb_send_raw("+", 1);
             return data_len;
         }
     }
+#endif
 }
 
 /* ========================================================================
@@ -880,3 +1024,121 @@ int gdb_handle(void) {
         }
     }
 }
+
+#ifdef __EMSCRIPTEN__
+/* WASM non-blocking GDB: send stop once, then process at most one packet.
+ * Returns 0=resume, 1=single-step resume, 2=still stopped (no packet), -1=detach. */
+static int wasm_gdb_stop_sent = 0;
+void bramble_gdb_notify_stop(void) { wasm_gdb_stop_sent = 0; }
+
+static int gdb_handle_one(const char *pkt) {
+    if (!pkt || !pkt[0]) return 2;
+    if (pkt[0] == 0x03) {
+        char resp[32];
+        snprintf(resp, sizeof(resp), "T02thread:%d;", gdb.stop_core + 1);
+        gdb_send_packet(resp);
+        return 2;
+    }
+    switch (pkt[0]) {
+    case '?': {
+        char resp[32];
+        snprintf(resp, sizeof(resp), "T05thread:%d;", gdb.stop_core + 1);
+        gdb_send_packet(resp);
+        return 2;
+    }
+    case 'g': handle_read_registers(); return 2;
+    case 'G': handle_write_registers(pkt + 1); return 2;
+    case 'p': handle_read_register(pkt + 1); return 2;
+    case 'P': handle_write_register(pkt + 1); return 2;
+    case 'm': handle_read_memory(pkt + 1); return 2;
+    case 'M': handle_write_memory(pkt + 1); return 2;
+    case 'c': gdb.single_step = 0; return 0;
+    case 's': gdb.single_step = 1; return 1;
+    case 'Z':
+        if (pkt[1] == '0' || pkt[1] == '1') handle_set_breakpoint(pkt + 1);
+        else if (pkt[1] == '2' || pkt[1] == '3' || pkt[1] == '4') handle_set_watchpoint(pkt + 1);
+        else gdb_send_packet("");
+        return 2;
+    case 'z':
+        if (pkt[1] == '0' || pkt[1] == '1') handle_remove_breakpoint(pkt + 1);
+        else if (pkt[1] == '2' || pkt[1] == '3' || pkt[1] == '4') handle_remove_watchpoint(pkt + 1);
+        else gdb_send_packet("");
+        return 2;
+    case 'D':
+        gdb_send_packet("OK");
+        gdb.active = 0;
+        return -1;
+    case 'k':
+        gdb.active = 0;
+        return -1;
+    case 'H':
+        if (pkt[1] == 'g') {
+            gdb.g_thread = parse_thread_id(pkt + 2);
+            if (gdb.g_thread < 0) gdb.g_thread = 0;
+        } else if (pkt[1] == 'c') {
+            gdb.c_thread = parse_thread_id(pkt + 2);
+        }
+        gdb_send_packet("OK");
+        return 2;
+    case 'T': {
+        int tid = (int)hex_to_u32(pkt + 1, NULL);
+        if (tid >= 1 && tid <= num_active_cores) gdb_send_packet("OK");
+        else gdb_send_packet("E01");
+        return 2;
+    }
+    case 'v':
+        if (strncmp(pkt, "vMustReplyEmpty", 15) == 0) gdb_send_packet("");
+        else if (strncmp(pkt, "vCont?", 6) == 0) gdb_send_packet("vCont;c;s;C;S");
+        else if (strncmp(pkt, "vCont;c", 7) == 0) { gdb.single_step = 0; return 0; }
+        else if (strncmp(pkt, "vCont;s", 7) == 0) { gdb.single_step = 1; return 1; }
+        else gdb_send_packet("");
+        return 2;
+    case 'q': handle_query(pkt); return 2;
+    default: gdb_send_packet(""); return 2;
+    }
+}
+
+int bramble_gdb_poll(void) {
+    if (!gdb.active) return -1;
+    if (!wasm_gdb_stop_sent) {
+        if (gdb.wp_hit) {
+            char resp[64];
+            const char *wp_type = "awatch";
+            if (gdb.wp_hit_type == GDB_WP_WRITE) wp_type = "watch";
+            else if (gdb.wp_hit_type == GDB_WP_READ) wp_type = "rwatch";
+            snprintf(resp, sizeof(resp), "T05%s:%x;thread:%d;",
+                     wp_type, gdb.wp_hit_addr, gdb.stop_core + 1);
+            gdb_send_packet(resp);
+            gdb.wp_hit = 0;
+        } else {
+            char resp[32];
+            snprintf(resp, sizeof(resp), "T05thread:%d;", gdb.stop_core + 1);
+            gdb_send_packet(resp);
+        }
+        gdb.single_step = 0;
+        wasm_gdb_stop_sent = 1;
+    }
+    {
+        char pkt[4096];
+        int len = gdb_recv_packet(pkt, sizeof(pkt));
+        if (len < 0) { gdb.active = 0; return -1; }
+        if (len == 0) return 2;
+        return gdb_handle_one(pkt);
+    }
+}
+
+/* WASM GDB server start without TCP (WebSocket proxy provides transport) */
+int bramble_gdb_start(void) {
+    memset(&gdb, 0, sizeof(gdb));
+    gdb.server_fd = -1;
+    gdb.client_fd = -1;
+    gdb.port = 3333;
+    gdb.active = 1;
+    gdb.g_thread = 0;
+    gdb.c_thread = -1;
+    gdb.stop_core = 0;
+    wasm_gdb_stop_sent = 0;
+    return 0;
+}
+void bramble_gdb_stop(void) { gdb.active = 0; }
+#endif

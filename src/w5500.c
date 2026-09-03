@@ -176,12 +176,13 @@ static void w5500_process_socket_cmd(w5500_t *dev, int sock) {
         break;
 
     case W5500_CMD_SEND: {
-        /* Read TX data from buffer */
+        /* Read TX data from buffer (C5: clamp to avoid stack overflow) */
         uint16_t tx_rd = ((uint16_t)s->regs[W5500_Sn_TX_RD0] << 8) |
                          s->regs[W5500_Sn_TX_RD0 + 1];
         uint16_t tx_wr = ((uint16_t)s->regs[W5500_Sn_TX_WR0] << 8) |
                          s->regs[W5500_Sn_TX_WR0 + 1];
-        uint16_t data_len = tx_wr - tx_rd;
+        uint16_t data_len = (uint16_t)(tx_wr - tx_rd);
+        if (data_len > W5500_TX_BUF_SIZE) data_len = W5500_TX_BUF_SIZE;
 
         if (dev->live && s->host_fd >= 0 && data_len > 0) {
             uint8_t send_buf[W5500_TX_BUF_SIZE];
@@ -199,6 +200,18 @@ static void w5500_process_socket_cmd(w5500_t *dev, int sock) {
                 send(s->host_fd, send_buf, data_len, MSG_NOSIGNAL);
             }
         }
+#ifdef __EMSCRIPTEN__
+        /* WASM live via WebSocket proxy: mirror SEND to JS even when host_fd<0.
+         * Proxy (web/net_proxy.py) performs real TCP/UDP and returns data via
+         * bramble_w5500_dev_push_rx(). Format: [sock:1][len:2 LE][payload]. */
+        if (dev->live && data_len > 0) {
+            extern void bramble_ws_send_w5500(int sock_idx, const uint8_t *data, int len);
+            uint8_t tmp[W5500_TX_BUF_SIZE];
+            for (uint16_t i = 0; i < data_len; i++)
+                tmp[i] = s->tx_buf[(tx_rd + i) % W5500_TX_BUF_SIZE];
+            bramble_ws_send_w5500((int)(s - dev->sockets), tmp, (int)data_len);
+        }
+#endif
 
         /* Advance TX read pointer to write pointer */
         s->regs[W5500_Sn_TX_RD0] = s->regs[W5500_Sn_TX_WR0];
@@ -492,3 +505,30 @@ void w5500_set_live(w5500_t *dev, int enable) {
         fprintf(stderr, "[W5500] Live networking enabled\n");
     }
 }
+
+#ifdef __EMSCRIPTEN__
+/* Push proxy-received bytes into socket RX buffer (called from JS via export).
+ * Sets RECV interrupt like native recv path. */
+int bramble_w5500_dev_push_rx(w5500_t *dev, int sock, const uint8_t *data, int len) {
+    if (!dev || sock < 0 || sock >= W5500_NUM_SOCKETS || !data || len <= 0) return -1;
+    w5500_socket_t *s = &dev->sockets[sock];
+    uint16_t rx_rsr = ((uint16_t)s->regs[W5500_Sn_RX_RSR0] << 8) |
+                      s->regs[W5500_Sn_RX_RSR0 + 1];
+    uint16_t free_space = W5500_RX_BUF_SIZE - rx_rsr;
+    if (free_space == 0) return 0;
+    if (len > free_space) len = free_space;
+    uint16_t rx_wr = ((uint16_t)s->regs[W5500_Sn_RX_WR0] << 8) |
+                     s->regs[W5500_Sn_RX_WR0 + 1];
+    for (int i = 0; i < len; i++)
+        s->rx_buf[(rx_wr + (uint16_t)i) % W5500_RX_BUF_SIZE] = data[i];
+    rx_wr = (uint16_t)(rx_wr + (uint16_t)len);
+    s->regs[W5500_Sn_RX_WR0]     = (rx_wr >> 8) & 0xFF;
+    s->regs[W5500_Sn_RX_WR0 + 1] = rx_wr & 0xFF;
+    rx_rsr = (uint16_t)(rx_rsr + (uint16_t)len);
+    s->regs[W5500_Sn_RX_RSR0]     = (rx_rsr >> 8) & 0xFF;
+    s->regs[W5500_Sn_RX_RSR0 + 1] = rx_rsr & 0xFF;
+    s->regs[W5500_Sn_IR] |= 0x04;
+    return len;
+}
+/* Default device for JS-friendly export (wraps wasm_w5500 in bramble_wasm.c) */
+#endif

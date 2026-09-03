@@ -168,6 +168,41 @@
         <span class="info-val" id="mem-val" style="font-size:11px;line-height:28px">-</span>
       </div>
     </div>
+
+    <div class="panel">
+      <h3>Devtools (18)</h3>
+      <div class="btn-row" style="gap:4px">
+        <button class="btn" style="padding:2px 6px;font-size:10px" onclick="devStart('coverage')">Cov</button>
+        <button class="btn" style="padding:2px 6px;font-size:10px" onclick="devStart('trace')">Trace</button>
+        <button class="btn" style="padding:2px 6px;font-size:10px" onclick="devStart('hotspots')">Hot</button>
+        <button class="btn" style="padding:2px 6px;font-size:10px" onclick="devStart('profile')">Prof</button>
+        <button class="btn" style="padding:2px 6px;font-size:10px" onclick="devStart('callgraph')">Call</button>
+        <button class="btn" style="padding:2px 6px;font-size:10px" onclick="devStart('vcd')">VCD</button>
+        <button class="btn" style="padding:2px 6px;font-size:10px" onclick="devStart('irq')">IRQ</button>
+        <button class="btn" style="padding:2px 6px;font-size:10px" onclick="devStart('stack')">Stack</button>
+        <button class="btn" style="padding:2px 6px;font-size:10px" onclick="devStart('heatmap')">Heat</button>
+      </div>
+      <div class="btn-row" style="gap:4px;margin-top:4px">
+        <button class="btn" style="padding:2px 6px;font-size:10px" onclick="devDump()">Dump+Download</button>
+        <span class="info-val" id="dev-status" style="font-size:10px">idle</span>
+      </div>
+      <div style="font-size:10px;margin-top:4px">proxy: <code>python3 web/net_proxy.py --ws 8765</code></div>
+    </div>
+
+    <div class="panel">
+      <h3>Threads</h3>
+      <div class="info-row"><span>Isolated:</span><span class="info-val" id="sb-status">?</span></div>
+      <div class="info-row"><span>Mode:</span><span class="info-val" id="thread-mode">cooperative</span></div>
+      <div style="font-size:10px">Serve with COOP/COEP for SAB threads:<br><code>python3 web/serve_coop.py 8080</code></div>
+    </div>
+
+    <div class="panel">
+      <h3>WASM Tests</h3>
+      <div class="btn-row">
+        <button class="btn" style="padding:2px 6px;font-size:10px" onclick="runWasmTests()">Run 319 (Node)</button>
+      </div>
+      <div style="font-size:10px">node test-wasm.js == ctest; MicroPython REPL via USB-CDC + <code>-stdin</code></div>
+    </div>
   </div>
 
   <div class="console-area">
@@ -224,7 +259,9 @@ function updateCoreState() {
   mod._free(spBuf);
   $('core-pc').textContent = '0x' + pc.toString(16).padStart(8, '0');
   $('core-sp').textContent = '0x' + sp.toString(16).padStart(8, '0');
-  $('core-status').textContent = mod._bramble_is_halted() ? 'halted' : 'running';
+  let st = mod._bramble_is_halted() ? 'halted' : 'running';
+  try { if (mod._bramble_gdb_is_hit()) st = 'gdb-stop core' + mod._bramble_gdb_hit_core(); } catch(e) {}
+  $('core-status').textContent = st;
 }
 
 function frame() {
@@ -235,6 +272,17 @@ function frame() {
   if (elapsed > 16) {
     const steps = mod._bramble_step(CYCLES_PER_FRAME);
     totalInstructions += steps;
+
+    // pump GDB TX -> WebSocket (non-blocking RSP)
+    try {
+      const n = mod._bramble_gdb_tx_len();
+      if (n > 0 && window.brambleGDB && window.brambleGDB.readyState === 1) {
+        const ptr = mod._malloc(n);
+        const got = mod._bramble_gdb_pop_tx(ptr, n);
+        window.brambleGDB.send(mod.HEAPU8.slice(ptr, ptr + got));
+        mod._free(ptr);
+      }
+    } catch(e) {}
 
     let ch;
     while ((ch = mod._bramble_read_uart(0)) !== -1) {
@@ -317,6 +365,11 @@ async function loadFirmware(data, name) {
   const arch = isRV ? 1 : (isPico2 ? 2 : 0);
   mod._bramble_init(arch);
   mod._bramble_set_clock(parseInt($('clock-select').value));
+  try {
+    mod._bramble_set_cores(parseInt($('cores-select').value || '2'));
+    mod._bramble_set_jit($('chk-jit')?.checked ? 1 : 0);
+    mod._bramble_set_debug($('chk-debug')?.checked ? 1 : 0, -1);
+  } catch(e) {}
 
   uartText = '';
   serialEl.textContent = '';
@@ -350,24 +403,201 @@ window.loadPreset = async (name) => {
   } catch(e) { $('status').textContent = `Failed ${name}: ${e.message}`; }
 };
 window.connectGDB = () => {
-  const port = $('gdb-port').value || '3333';
-  const url = `ws://${location.hostname}:${port}`;
-  try { const ws=new WebSocket(url); ws.onopen=()=>{$('status').textContent=`GDB WebSocket ${url} open`; window.brambleGDB=ws;}; ws.onmessage=(e)=>{ const bytes=new Uint8Array(e.data); for(const b of bytes) mod._bramble_write_uart(b); }; ws.onerror=()=> $('status').textContent=`GDB ${url} error`; } catch(e){ $('status').textContent=`GDB err ${e.message}`; }
+  // Proxy: python3 web/net_proxy.py --ws 8765 --gdb-tcp 3333
+  // Browser WS /gdb <-> proxy TCP :3333 <-> arm-none-eabi-gdb
+  const base = ($('net-url').value || 'ws://localhost:8765').replace(/\/uart\/?$/, '');
+  const url = base.replace(/\/$/, '') + '/gdb';
+  try {
+    const ws = new WebSocket(url);
+    ws.binaryType = 'arraybuffer';
+    ws.onopen = () => {
+      $('status').textContent = `GDB ${url} open -> :3333`;
+      window.brambleGDB = ws;
+      try { mod._bramble_gdb_enable(1); } catch(e) {}
+    };
+    const pushGdb = (u8) => {
+      const ptr = mod._malloc(u8.length);
+      mod.HEAPU8.set(u8, ptr);
+      try { mod._bramble_gdb_push_rx(ptr, u8.length); } catch(e) {}
+      mod._free(ptr);
+    };
+    ws.onmessage = (e) => {
+      const u8 = e.data instanceof ArrayBuffer ? new Uint8Array(e.data)
+        : typeof e.data === 'string' ? new TextEncoder().encode(e.data) : new Uint8Array(e.data);
+      pushGdb(u8);
+    };
+    // pump TX queue -> WS each frame
+    if (!window._gdbPump) {
+      window._gdbPump = setInterval(() => {
+        try {
+          const n = mod._bramble_gdb_tx_len();
+          if (n > 0 && window.brambleGDB && window.brambleGDB.readyState === 1) {
+            const ptr = mod._malloc(n);
+            const got = mod._bramble_gdb_pop_tx(ptr, n);
+            const out = mod.HEAPU8.slice(ptr, ptr + got);
+            mod._free(ptr);
+            window.brambleGDB.send(out);
+          }
+          if (mod._bramble_gdb_is_hit()) {
+            $('core-status').textContent = 'gdb-stop core' + mod._bramble_gdb_hit_core();
+          }
+        } catch(e) {}
+      }, 16);
+    }
+    ws.onclose = () => { try { mod._bramble_gdb_enable(0); } catch(e) {} };
+    ws.onerror = () => $('status').textContent = `GDB ${url} error (run net_proxy.py)`;
+  } catch(e){ $('status').textContent = `GDB err ${e.message}`; }
 };
 window.connectNet = () => {
-  const url = $('net-url').value || 'ws://localhost:9999';
-  try { const ws=new WebSocket(url); ws.binaryType='arraybuffer'; ws.onopen=()=>{$('status').textContent=`Net ${url} open`; window.brambleNetSocket=ws;}; ws.onmessage=(e)=>{ const arr=new Uint8Array(e.data); for(const b of arr) mod._bramble_write_uart(b); }; ws.onerror=()=> $('status').textContent=`Net ${url} error`; } catch(e){ $('status').textContent=`Net err ${e.message}`; }
+  const url = $('net-url').value || 'ws://localhost:8765/uart';
+  const isEth = /\/eth/.test(url);
+  const wsUrl = isEth ? url : url;
+  try {
+    const ws = new WebSocket(wsUrl);
+    ws.binaryType = 'arraybuffer';
+    ws.onopen = () => {
+      $('status').textContent = `Net ${wsUrl} open`;
+      window.brambleNetSocket = ws;
+      try { mod._bramble_net_set_connected(1); mod._bramble_net_enable(1); } catch(e) {}
+    };
+    ws.onmessage = (e) => {
+      const arr = e.data instanceof ArrayBuffer ? new Uint8Array(e.data)
+        : typeof e.data === 'string' ? new TextEncoder().encode(e.data) : new Uint8Array(0);
+      if (!arr.length) return;
+      // Demux proxy prefixes: W(sock,len,payload) / ETH frame / raw UART
+      if (arr[0] === 0x57 && arr.length >= 4) {
+        const sock = arr[1], ln = arr[2] | (arr[3] << 8);
+        const payload = arr.slice(4, 4 + ln);
+        const ptr = mod._malloc(payload.length);
+        mod.HEAPU8.set(payload, ptr);
+        try { mod._bramble_w5500_push_rx(sock, ptr, payload.length); } catch(err) {}
+        mod._free(ptr);
+      } else if (arr.length >= 6 && arr[0] === 0x45 && arr[1] === 0x54 && arr[2] === 0x48) {
+        const ln = arr[4] | (arr[5] << 8);
+        const frame = arr.slice(6, 6 + ln);
+        const ptr = mod._malloc(frame.length);
+        mod.HEAPU8.set(frame, ptr);
+        try { mod._bramble_eth_push_rx(ptr, frame.length); } catch(err) {}
+        mod._free(ptr);
+      } else if (arr.length >= 14) {
+        // Heuristic: looks like raw ETH frame -> vnet, else UART
+        // Try ETH first only when /eth URL, else UART
+        if (isEth) {
+          const ptr = mod._malloc(arr.length);
+          mod.HEAPU8.set(arr, ptr);
+          try { mod._bramble_eth_push_rx(ptr, arr.length); } catch(err) {}
+          mod._free(ptr);
+        } else {
+          const ptr = mod._malloc(arr.length);
+          mod.HEAPU8.set(arr, ptr);
+          try { mod._bramble_net_push_rx(ptr, arr.length); } catch(err) {
+            for (const b of arr) mod._bramble_write_uart(b);
+          }
+          mod._free(ptr);
+        }
+      } else {
+        const ptr = mod._malloc(arr.length);
+        mod.HEAPU8.set(arr, ptr);
+        try { mod._bramble_net_push_rx(ptr, arr.length); } catch(err) {
+          for (const b of arr) mod._bramble_write_uart(b);
+        }
+        mod._free(ptr);
+      }
+    };
+    ws.onclose = () => { try { mod._bramble_net_set_connected(0); } catch(e) {} };
+    ws.onerror = () => $('status').textContent = `Net ${wsUrl} error (run net_proxy.py)`;
+  } catch(e){ $('status').textContent = `Net err ${e.message}`; }
 };
-document.getElementById('chk-jit')?.addEventListener('change', e=>{ $('status').textContent=`JIT ${e.target.checked?'on':'off'} (rebuild with -jit for native)`; });
-document.getElementById('chk-debug')?.addEventListener('change', e=>{ $('status').textContent=`Debug ${e.target.checked?'on':'off'}`; });
-document.getElementById('cores-select')?.addEventListener('change', e=>{ $('status').textContent=`Cores ${e.target.value}`; });
+// Wire BroadcastChannel RX -> UART/GPIO/ETH (peer tabs)
+window.brambleWireRx = (uart, ch) => {
+  try { mod._bramble_write_uart(ch); } catch(e) {}
+};
+window.brambleGpioRx = (pin, value) => {
+  try { mod._bramble_mem_write32(0x40014000 + pin * 8, value ? 1 : 0); } catch(e) {}
+};
+window.brambleEthRx = (data) => {
+  try {
+    const u8 = data instanceof Uint8Array ? data : new Uint8Array(data);
+    const ptr = mod._malloc(u8.length);
+    mod.HEAPU8.set(u8, ptr);
+    mod._bramble_eth_push_rx(ptr, u8.length);
+    mod._free(ptr);
+  } catch(e) {}
+};
+window.devStart = (which) => {
+  try {
+    if (which === 'coverage') mod._bramble_coverage_start();
+    else if (which === 'trace') mod._bramble_trace_start();
+    else if (which === 'hotspots') mod._bramble_hotspots_start(20);
+    else if (which === 'profile') mod._bramble_profile_start();
+    else if (which === 'callgraph') mod._bramble_callgraph_start();
+    else if (which === 'vcd') mod._bramble_gpiotrace_start();
+    else if (which === 'irq') mod._bramble_irqlat_start();
+    else if (which === 'stack') mod._bramble_stackcheck_start();
+    else if (which === 'heatmap') mod._bramble_heatmap_start();
+    $('dev-status').textContent = which + ' on';
+  } catch(e) { $('dev-status').textContent = 'err ' + e.message; }
+};
+window.devDump = () => {
+  try {
+    mod._bramble_coverage_dump(); mod._bramble_hotspots_report();
+    mod._bramble_profile_dump(); mod._bramble_callgraph_dump();
+    mod._bramble_irqlat_report(); mod._bramble_stackcheck_report();
+    mod._bramble_heatmap_dump(); mod._bramble_gpiotrace_stop(); mod._bramble_trace_stop();
+    const files = ['/coverage.bin','/trace.bin','/profile.csv','/callgraph.dot','/gpio.vcd','/heatmap.csv'];
+    for (const f of files) {
+      try {
+        const bytes = mod.FS.readFile(f);
+        const blob = new Blob([bytes], {type:'application/octet-stream'});
+        const a = document.createElement('a');
+        a.href = URL.createObjectURL(blob); a.download = f.slice(1);
+        a.click(); setTimeout(()=>URL.revokeObjectURL(a.href), 2000);
+      } catch(e) {}
+    }
+    $('dev-status').textContent = 'dumped';
+  } catch(e) { $('dev-status').textContent = 'err ' + e.message; }
+};
+window.runWasmTests = async () => {
+  $('status').textContent = 'See node test-wasm.js (319 tests)';
+  try {
+    const res = await fetch('./bramble.wasm.wasm');
+    $('status').textContent = `WASM ${(await res.arrayBuffer()).byteLength}B ready; run: node test-wasm.js`;
+  } catch(e) { $('status').textContent = 'test err ' + e.message; }
+};
+document.getElementById('chk-jit')?.addEventListener('change', e=>{
+  try { mod._bramble_set_jit(e.target.checked ? 1 : 0); } catch(err) {}
+  $('status').textContent = `JIT ${e.target.checked?'on':'off'}`;
+});
+document.getElementById('chk-debug')?.addEventListener('change', e=>{
+  try { mod._bramble_set_debug(e.target.checked ? 1 : 0, -1); } catch(err) {}
+  $('status').textContent = `Debug ${e.target.checked?'on':'off'}`;
+});
+document.getElementById('cores-select')?.addEventListener('change', e=>{
+  try { mod._bramble_set_cores(parseInt(e.target.value)); } catch(err) {}
+  $('status').textContent = `Cores ${e.target.value} (cooperative)`;
+});
 document.getElementById('flash-file')?.addEventListener('change', async e=>{
-  const f=e.target.files[0]; if(!f) return;
-  const buf=new Uint8Array(await f.arrayBuffer());
-  const ptr=mod._malloc(buf.length); mod.HEAPU8.set(buf,ptr);
-  // Use OPFS persist via flash_persist path if available
-  try{ mod.ccall('flash_persist_set_path','', ['string'], ['/flash.bin']); }catch{}
-  $('status').textContent=`Flash ${f.name} ${buf.length} bytes loaded to MEMFS`;
+  const f = e.target.files[0]; if(!f || !mod) return;
+  const buf = new Uint8Array(await f.arrayBuffer());
+  const ptr = mod._malloc(buf.length); mod.HEAPU8.set(buf, ptr);
+  try {
+    const name = f.name.toLowerCase();
+    if (name.includes('sdcard') || name.endsWith('.img')) {
+      // Heuristic: SD image vs flash image by size (>4MB = SD)
+      if (buf.length > 4*1024*1024) {
+        mod._bramble_sdcard_load(ptr, buf.length, 1);
+        $('status').textContent = `SD ${f.name} ${buf.length} bytes on SPI1`;
+      } else {
+        mod._bramble_flash_write(ptr, buf.length, 0);
+        mod.ccall('flash_persist_set_path', null, ['string'], ['/flash.bin']);
+        try { mod._bramble_flash_save(); } catch(err) {}
+        $('status').textContent = `Flash ${f.name} ${buf.length} bytes -> MEMFS/IDBFS`;
+      }
+    } else {
+      mod._bramble_flash_write(ptr, buf.length, 0);
+      $('status').textContent = `Flash ${f.name} ${buf.length} bytes staged`;
+    }
+  } catch(err) { $('status').textContent = `Flash err ${err.message}`; }
   mod._free(ptr);
 });
 
@@ -395,6 +625,10 @@ try {
     print: (t) => console.log(t),
     printErr: (t) => console.log(t)
   });
+  try {
+    $('sb-status').textContent = (typeof crossOriginIsolated !== 'undefined' && crossOriginIsolated) ? 'yes (SAB)' : 'no (coop)';
+    $('thread-mode').textContent = (typeof crossOriginIsolated !== 'undefined' && crossOriginIsolated) ? 'coop (SAB ready, rebuild -pthread for workers)' : 'cooperative';
+  } catch(e) {}
   $('status').textContent = 'Ready - drop a UF2 file to begin';
   $('btn-run').disabled = false;
   $('btn-pause').disabled = false;

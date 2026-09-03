@@ -37,8 +37,8 @@ int flash_persist_open(void) {
             fprintf(stderr, "[Storage] Failed to open flash file: %s\n", persist_path);
             return -1;
         }
-        /* New file: write full flash image */
-        fwrite(cpu.flash, 1, FLASH_SIZE, persist_fp);
+        /* New file: write full flash image (RP2350 max) */
+        fwrite(cpu.flash, 1, FLASH_SIZE_MAX, persist_fp);
         fflush(persist_fp);
         fprintf(stderr, "[Storage] Created flash file: %s\n", persist_path);
     }
@@ -48,7 +48,7 @@ int flash_persist_open(void) {
 
 void flash_persist_sync(uint32_t offset, uint32_t len) {
     if (!persist_fp) return;
-    if (offset + len > FLASH_SIZE) return;
+    if (offset >= FLASH_SIZE_MAX || len > FLASH_SIZE_MAX - offset) return;
 
     fseek(persist_fp, (long)offset, SEEK_SET);
     fwrite(&cpu.flash[offset], 1, len, persist_fp);
@@ -64,16 +64,29 @@ void flash_persist_save_all(void) {
             fprintf(stderr, "[Storage] Failed to save flash: %s\n", persist_path);
             return;
         }
-        fwrite(cpu.flash, 1, FLASH_SIZE, persist_fp);
+        fwrite(cpu.flash, 1, FLASH_SIZE_MAX, persist_fp);
         fclose(persist_fp);
         persist_fp = NULL;
         fprintf(stderr, "[Flash] Saved to %s\n", persist_path);
         return;
     }
 
-    /* Rewrite entire file */
+    /* Rewrite entire file (atomic: tmp + rename to avoid truncation on crash M17) */
+    {
+        char tmp[1024];
+        snprintf(tmp, sizeof(tmp), "%s.tmp", persist_path ? persist_path : "/tmp/flash.tmp");
+        FILE *tf = fopen(tmp, "wb");
+        if (tf) {
+            fwrite(cpu.flash, 1, FLASH_SIZE_MAX, tf);
+            fflush(tf);
+            fclose(tf);
+            rename(tmp, persist_path);
+            fprintf(stderr, "[Flash] Saved to %s\n", persist_path);
+            return;
+        }
+    }
     fseek(persist_fp, 0, SEEK_SET);
-    fwrite(cpu.flash, 1, FLASH_SIZE, persist_fp);
+    fwrite(cpu.flash, 1, FLASH_SIZE_MAX, persist_fp);
     fflush(persist_fp);
     fprintf(stderr, "[Flash] Saved to %s\n", persist_path);
 }

@@ -55,10 +55,14 @@
 
 /* GPIO State Structure */
 typedef struct {
-    /* SIO registers (fast access) */
-    uint32_t gpio_in;        /* Current input values */
-    uint32_t gpio_out;       /* Output values */
-    uint32_t gpio_oe;        /* Output enable mask */
+    /* SIO registers (fast access) - low 32 pins */
+    uint32_t gpio_in;        /* Current input values (pins 0-31) */
+    uint32_t gpio_out;       /* Output values (pins 0-31) */
+    uint32_t gpio_oe;        /* Output enable mask (pins 0-31) */
+    /* SIO high registers for RP2350 pins 32-47 (16 bits used) */
+    uint32_t gpio_in_hi;     /* Input values pins 32-47 (bits 0-15) */
+    uint32_t gpio_out_hi;    /* Output values pins 32-47 */
+    uint32_t gpio_oe_hi;     /* Output enable pins 32-47 */
 
     /* Per-pin configuration (IO_BANK0) */
     struct {
@@ -71,6 +75,9 @@ typedef struct {
     uint32_t proc0_inte[6];  /* Interrupt enable for processor 0 */
     uint32_t proc0_intf[6];  /* Interrupt force for processor 0 */
     uint32_t proc0_ints[6];  /* Interrupt status for processor 0 */
+    uint32_t proc1_inte[6];  /* Interrupt enable for processor 1 */
+    uint32_t proc1_intf[6];  /* Interrupt force for processor 1 */
+    uint32_t proc1_ints[6];  /* Interrupt status for processor 1 */
 
     /* Pad control registers */
     uint32_t pads[NUM_GPIO_PINS];

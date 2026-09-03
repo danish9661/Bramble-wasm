@@ -26,7 +26,7 @@
 
 #define WIRE_MAX_LINKS  4
 #define WIRE_MAX_PAYLOAD 8
-#define WIRE_IO_BUFFER_SIZE 256
+#define WIRE_IO_BUFFER_SIZE 2048
 #define WIRE_ETH_MAX_FRAME 1522
 
 /* Wire message types */

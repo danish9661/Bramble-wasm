@@ -126,6 +126,7 @@ void systick_tick(uint32_t cycles) {
             remaining -= full_periods * reload;
             if (st->csr & 2) {
                 st->pending = 1;
+                corepool_wake_cores();
             }
         }
     }
@@ -316,7 +317,7 @@ uint32_t nvic_read_register(uint32_t addr) {
                     for (int i = 0; i < 4; i++) {
                         uint32_t irq_idx = offset * 4 + i;
                         if (irq_idx < NUM_EXTERNAL_IRQS) {
-                            result |= ((uint32_t)ns->priority[irq_idx]) << (i * 8);
+                            result |= ((uint32_t)(ns->priority[irq_idx] & 0xC0u)) << (i * 8);
                         }
                     }
                     return result;
@@ -431,13 +432,13 @@ void nvic_write_register(uint32_t addr, uint32_t val) {
                     for (int i = 0; i < 4; i++) {
                         uint32_t irq_idx = offset * 4 + i;
                         if (irq_idx < NUM_EXTERNAL_IRQS) {
-                            ns->priority[irq_idx] = (val >> (i * 8)) & 0xFF;
+                            ns->priority[irq_idx] = (uint8_t)((val >> (i * 8)) & 0xC0u);
                         }
                     }
-                    /* Recompute fast-path flag */
+                    /* Recompute fast-path flag (H9/L7: only effective bits) */
                     ns->priorities_nondefault = 0;
                     for (uint32_t i = 0; i < NUM_EXTERNAL_IRQS; i++) {
-                        if (ns->priority[i] != 0) { ns->priorities_nondefault = 1; break; }
+                        if ((ns->priority[i] & 0xC0u) != 0) { ns->priorities_nondefault = 1; break; }
                     }
                 }
             }

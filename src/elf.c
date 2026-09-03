@@ -215,8 +215,8 @@ int load_elf(const char *filename) {
          */
         uint32_t target = phdr.p_vaddr;
 
-        /* Load into flash */
-        if (region_contains(FLASH_BASE, FLASH_SIZE, target, phdr.p_memsz)) {
+        /* Load into flash (H13: use MAX for RP2350 4MB firmware) */
+        if (region_contains(FLASH_BASE, FLASH_SIZE_MAX, target, phdr.p_memsz)) {
             uint32_t flash_offset = target - FLASH_BASE;
 
             /* Zero the memory region first (for .bss-like sections where memsz > filesz) */
@@ -240,8 +240,8 @@ int load_elf(const char *filename) {
             fprintf(stderr, "[ELF] Loaded %u bytes to flash[0x%08X]\n", phdr.p_filesz, flash_offset);
             segments_loaded++;
         }
-        /* Load into RAM */
-        else if (region_contains(RAM_BASE, RAM_SIZE, target, phdr.p_memsz)) {
+        /* Load into RAM (H13: RP2350 has 520KB, accept up to 1MB) */
+        else if (region_contains(RAM_BASE, (512 * 1024) + (8 * 1024), target, phdr.p_memsz)) {
             uint32_t ram_offset = target - RAM_BASE;
 
             if (phdr.p_memsz > 0) {
@@ -262,7 +262,7 @@ int load_elf(const char *filename) {
 
             fprintf(stderr, "[ELF] Loaded %u bytes to RAM[0x%08X]\n", phdr.p_filesz, ram_offset);
 
-            if (region_contains(FLASH_BASE, FLASH_SIZE, phdr.p_paddr, phdr.p_filesz) &&
+            if (region_contains(FLASH_BASE, FLASH_SIZE_MAX, phdr.p_paddr, phdr.p_filesz) &&
                 phdr.p_paddr != phdr.p_vaddr) {
                 uint32_t flash_offset = phdr.p_paddr - FLASH_BASE;
 

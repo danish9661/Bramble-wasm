@@ -1228,6 +1228,30 @@ skip_fuse:
                 }
             }
 
+            /* H16: GDB stop check in RV path */
+            if (gdb_enabled) {
+                if (gdb_should_stop(rv_cores[0].pc, 0) ||
+                    (!rv_cores[1].is_halted && gdb_should_stop(rv_cores[1].pc, 1))) {
+                    if (gdb_handle() < 0) break;
+                }
+            }
+
+            /* H17: watchdog, fault injection, script, storage flush */
+            if (watchdog_reboot_pending) {
+                reboot_from_watchdog(tap_name, &sdcard, sdcard_path, sdcard_spi,
+                                     &emmc_dev, emmc_path, emmc_spi);
+                /* re-init RV harts after reboot */
+                rv_cpu_reset(&rv_cores[0], 0x00000000);
+                rv_cpu_reset(&rv_cores[1], 0x00000000);
+                rv_cores[1].is_halted = 1;
+            }
+            fault_check(rv_cores[0].cycle_count);
+            if ((step_count & 0x3FF) == 0) {
+                script_poll(1024);
+                if (sdcard_path) sdcard_flush(&sdcard);
+                if (emmc_path) emmc_flush(&emmc_dev);
+            }
+
             /* Poll stdin and peripherals periodically */
             if (stdin_enabled && (step_count & 0x3FF) == 0)
                 uart_stdin_poll();

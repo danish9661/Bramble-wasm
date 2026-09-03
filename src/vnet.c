@@ -166,31 +166,35 @@ static void vnet_tap_tx(const uint8_t *frame, int len) {
     }
 }
 
-/* Forward a frame to all connected peers */
+/* Forward a frame to all connected peers (C9: single-buffer atomic write) */
 static void vnet_peers_tx(const uint8_t *frame, int len) {
     for (int i = 0; i < vnet.peer_count; i++) {
         vnet_peer_t *p = &vnet.peers[i];
         if (p->fd < 0) continue;
 
-        /* Length-prefixed framing: 4-byte LE length + frame */
+        /* Length-prefixed framing: 4-byte LE length + frame in one buffer
+         * so a partial header can never desync the peer. */
         uint32_t le_len = (uint32_t)len;
-        uint8_t hdr[4];
-        hdr[0] = (le_len >>  0) & 0xFF;
-        hdr[1] = (le_len >>  8) & 0xFF;
-        hdr[2] = (le_len >> 16) & 0xFF;
-        hdr[3] = (le_len >> 24) & 0xFF;
-
-        /* Best-effort write (non-blocking) */
-        ssize_t n = write(p->fd, hdr, 4);
-        if (n == 4) {
-            n = write(p->fd, frame, len);
-            if (n > 0) vnet.frames_peer_tx++;
+        uint8_t buf[4 + VNET_MAX_FRAME];
+        buf[0] = (uint8_t)((le_len >>  0) & 0xFF);
+        buf[1] = (uint8_t)((le_len >>  8) & 0xFF);
+        buf[2] = (uint8_t)((le_len >> 16) & 0xFF);
+        buf[3] = (uint8_t)((le_len >> 24) & 0xFF);
+        memcpy(buf + 4, frame, (size_t)len);
+        size_t total = (size_t)4 + (size_t)len;
+        size_t off = 0;
+        while (off < total) {
+            ssize_t n = write(p->fd, buf + off, total - off);
+            if (n > 0) { off += (size_t)n; continue; }
+            if (n < 0 && (errno == EAGAIN || errno == EWOULDBLOCK)) break; /* retry next poll */
+            if (n < 0) {
+                fprintf(stderr, "[VNet] Peer %s: write error, disconnecting\n", p->path);
+                close(p->fd);
+                p->fd = -1;
+            }
+            break;
         }
-        if (n < 0 && errno != EAGAIN && errno != EWOULDBLOCK) {
-            fprintf(stderr, "[VNet] Peer %s: write error, disconnecting\n", p->path);
-            close(p->fd);
-            p->fd = -1;
-        }
+        if (off == total) vnet.frames_peer_tx++;
     }
 }
 
