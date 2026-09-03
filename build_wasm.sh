@@ -40,6 +40,7 @@ EXPORTS='[
   "_bramble_get_gpio","_bramble_get_gpio_raw","_bramble_get_gpio_out","_bramble_get_gpio_oe","_bramble_set_gpio",
   "_bramble_mem_read32","_bramble_mem_write32",
   "_bramble_is_halted","_bramble_get_core_state",
+  "_bramble_usb_state32",
   "_bramble_get_flash_ptr","_bramble_get_sram_ptr",
   "_bramble_set_cores","_bramble_get_cores","_bramble_set_quantum",
   "_bramble_set_jit","_bramble_set_debug","_bramble_set_semihosting",
