@@ -24,6 +24,9 @@
 #include <sys/socket.h>
 #include <netinet/in.h>
 #include <arpa/inet.h>
+#ifdef __EMSCRIPTEN__
+#include <emscripten.h>
+#endif
 #include "w5500.h"
 
 /* ========================================================================
@@ -151,6 +154,24 @@ static void w5500_process_socket_cmd(w5500_t *dev, int sock) {
                     s->host_fd = -1;
                 }
             }
+#ifdef __EMSCRIPTEN__
+            if (dev->live) {
+                int widx = (int)(s - dev->sockets);
+                int wport = ((int)s->regs[W5500_Sn_PORT0] << 8) | (int)s->regs[W5500_Sn_PORT0 + 1];
+                EM_ASM({
+                    try {
+                        var sock = $0; var port = $1;
+                        if (typeof window !== 'undefined' && window.brambleNetSocket &&
+                            window.brambleNetSocket.readyState === 1) {
+                            var out = new Uint8Array(4);
+                            out[0] = 0x4C; out[1] = sock & 0xFF;
+                            out[2] = port & 0xFF; out[3] = (port >> 8) & 0xFF;
+                            try { window.brambleNetSocket.send(out); } catch(e) {}
+                        }
+                    } catch(e) {}
+                }, widx, wport);
+            }
+#endif
         }
         break;
 
@@ -167,12 +188,59 @@ static void w5500_process_socket_cmd(w5500_t *dev, int sock) {
                             sock, strerror(errno));
                 }
             }
+#ifdef __EMSCRIPTEN__
+            if (dev->live) {
+                int widx = (int)(s - dev->sockets);
+                int wa0 = (int)s->regs[W5500_Sn_DIPR0];
+                int wa1 = (int)s->regs[W5500_Sn_DIPR0 + 1];
+                int wa2 = (int)s->regs[W5500_Sn_DIPR0 + 2];
+                int wa3 = (int)s->regs[W5500_Sn_DIPR0 + 3];
+                int wport = ((int)s->regs[W5500_Sn_DPORT0] << 8) | (int)s->regs[W5500_Sn_DPORT0 + 1];
+                int wudp = ((int)s->regs[W5500_Sn_MR] & 0x0F) == W5500_MR_UDP ? 1 : 0;
+                EM_ASM({
+                    try {
+                        var sock = $0; var a0 = $1; var a1 = $2; var a2 = $3; var a3 = $4;
+                        var port = $5; var udp = $6;
+                        if (typeof window !== 'undefined' && window.brambleNetSocket &&
+                            window.brambleNetSocket.readyState === 1) {
+                            var out = new Uint8Array(9);
+                            out[0] = 0x43; out[1] = sock & 0xFF;
+                            out[2] = 6 & 0xFF; out[3] = 0;
+                            out[4] = udp & 0xFF; out[5] = a0 & 0xFF;
+                            out[6] = a1 & 0xFF; out[7] = a2 & 0xFF;
+                            out[8] = a3 & 0xFF;
+                            var out2 = new Uint8Array(11);
+                            var i = 0;
+                            for (i = 0; i < 9; i++) out2[i] = out[i];
+                            out2[9] = port & 0xFF; out2[10] = (port >> 8) & 0xFF;
+                            try { window.brambleNetSocket.send(out2); } catch(e) {}
+                        }
+                    } catch(e) {}
+                }, widx, wa0, wa1, wa2, wa3, wport, wudp);
+            }
+#endif
         }
         break;
 
     case W5500_CMD_CLOSE:
         s->regs[W5500_Sn_SR] = W5500_SOCK_CLOSED;
         if (dev->live) w5500_close_host_sock(s);
+#ifdef __EMSCRIPTEN__
+        if (dev->live) {
+            int widx = (int)(s - dev->sockets);
+            EM_ASM({
+                try {
+                    var sock = $0;
+                    if (typeof window !== 'undefined' && window.brambleNetSocket &&
+                        window.brambleNetSocket.readyState === 1) {
+                        var out = new Uint8Array(2);
+                        out[0] = 0x58; out[1] = sock & 0xFF;
+                        try { window.brambleNetSocket.send(out); } catch(e) {}
+                    }
+                } catch(e) {}
+            }, widx);
+        }
+#endif
         break;
 
     case W5500_CMD_SEND: {
@@ -531,4 +599,20 @@ int bramble_w5500_dev_push_rx(w5500_t *dev, int sock, const uint8_t *data, int l
     return len;
 }
 /* Default device for JS-friendly export (wraps wasm_w5500 in bramble_wasm.c) */
+int bramble_w5500_dev_push_status(w5500_t *dev, int sock, int code) {
+    if (!dev || sock < 0 || sock >= W5500_NUM_SOCKETS) return -1;
+    w5500_socket_t *s = &dev->sockets[sock];
+    if (code) {
+        if (s->regs[W5500_Sn_SR] == W5500_SOCK_INIT ||
+            s->regs[W5500_Sn_SR] == W5500_SOCK_LISTEN ||
+            s->regs[W5500_Sn_SR] == W5500_SOCK_CLOSED) {
+            s->regs[W5500_Sn_SR] = W5500_SOCK_ESTABLISHED;
+        }
+        s->regs[W5500_Sn_IR] |= 0x01; /* CON */
+    } else {
+        s->regs[W5500_Sn_SR] = W5500_SOCK_CLOSED;
+        s->regs[W5500_Sn_IR] |= 0x02; /* DISCON */
+    }
+    return 0;
+}
 #endif

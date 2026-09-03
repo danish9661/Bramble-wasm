@@ -81,7 +81,9 @@
 #define USB_DPRAM_BUF_CTRL      0x080   /* Buffer control registers */
 #define USB_DPRAM_EP0_BUF       0x100   /* EP0 data buffer (64 bytes) */
 
-/* Enumeration state machine */
+/* Enumeration state machine (host-simulated; mirrors real host order:
+ * device desc -> address -> full desc -> config -> strings -> set config
+ * -> set interface -> CDC line coding -> control line -> active) */
 typedef enum {
     USB_ENUM_DISABLED,
     USB_ENUM_WAIT_PULLUP,
@@ -91,7 +93,13 @@ typedef enum {
     USB_ENUM_GET_DESC_FULL,
     USB_ENUM_GET_CONFIG_SHORT,
     USB_ENUM_GET_CONFIG_FULL,
+    USB_ENUM_GET_CONFIG_DATA,
+    USB_ENUM_GET_STRING_LANG,
+    USB_ENUM_GET_STRING_MFR,
+    USB_ENUM_GET_STRING_PROD,
+    USB_ENUM_GET_STRING_SN,
     USB_ENUM_SET_CONFIG,
+    USB_ENUM_SET_INTERFACE,
     USB_ENUM_CDC_SET_LINE_CODING,
     USB_ENUM_CDC_SET_CTRL_LINE,
     USB_ENUM_ACTIVE,

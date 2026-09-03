@@ -34,7 +34,7 @@ emcc "${SOURCES[@]}" $INCLUDES $COMMON_FLAGS \
   -s EXPORTED_FUNCTIONS="$EXPORTS" \
   -s EXPORTED_RUNTIME_METHODS='["ccall","cwrap","getValue","setValue","HEAPU8","HEAPU32","HEAP8"]' \
   -s INITIAL_MEMORY=67108864 -s MAXIMUM_MEMORY=268435456 -s STACK_SIZE=1048576 \
-  -s NO_EXIT_RUNTIME=1 -s ENVIRONMENT='web,worker' -s EXPORT_ES6=1 \
+  -s NO_EXIT_RUNTIME=1 -s ENVIRONMENT='web,worker,node' -s EXPORT_ES6=1 \
   -s USE_PTHREADS=1 -s PTHREAD_POOL_SIZE=2 \
   -o web/bramble.wasm.threads.js
 echo "threads build done (serve with serve_coop.py for SAB)"

@@ -632,6 +632,11 @@ int bramble_w5500_push_rx(int sock, const uint8_t *data, int len) {
     extern int bramble_w5500_dev_push_rx(w5500_t *dev, int sock, const uint8_t *data, int len);
     return bramble_w5500_dev_push_rx(&wasm_w5500, sock, data, len);
 }
+int bramble_w5500_push_status(int sock, int code) {
+    if (!wasm_w5500_on) return -1;
+    extern int bramble_w5500_dev_push_status(w5500_t *dev, int sock, int code);
+    return bramble_w5500_dev_push_status(&wasm_w5500, sock, code);
+}
 
 /* Devtools: all 18 tools over MEMFS (tmp bins) + query hooks */
 int bramble_coverage_start(void) { coverage_init(); coverage_enabled = 1; return 1; }

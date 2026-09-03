@@ -464,14 +464,23 @@ window.connectNet = () => {
       const arr = e.data instanceof ArrayBuffer ? new Uint8Array(e.data)
         : typeof e.data === 'string' ? new TextEncoder().encode(e.data) : new Uint8Array(0);
       if (!arr.length) return;
-      // Demux proxy prefixes: W(sock,len,payload) / ETH frame / raw UART
-      if (arr[0] === 0x57 && arr.length >= 4) {
+      // Demux proxy prefixes: W(sock,len,payload) / S(sock,1,code) / ETH frame / raw UART
+      // Proxy DATA comes as [sock<8, len_lo, len_hi, payload...] (no magic)
+      if (arr[0] < 8 && arr.length >= 3 && arr.length === 3 + (arr[1] | (arr[2] << 8)) && (arr[1] | (arr[2] << 8)) > 0) {
+        const payload = arr.slice(3);
+        const ptr = mod._malloc(payload.length);
+        mod.HEAPU8.set(payload, ptr);
+        try { mod._bramble_w5500_push_rx(arr[0], ptr, payload.length); } catch(err) {}
+        mod._free(ptr);
+      } else if (arr[0] === 0x57 && arr.length >= 4) {
         const sock = arr[1], ln = arr[2] | (arr[3] << 8);
         const payload = arr.slice(4, 4 + ln);
         const ptr = mod._malloc(payload.length);
         mod.HEAPU8.set(payload, ptr);
         try { mod._bramble_w5500_push_rx(sock, ptr, payload.length); } catch(err) {}
         mod._free(ptr);
+      } else if (arr[0] === 0x53 && arr.length >= 4) {
+        try { mod._bramble_w5500_push_status(arr[1], arr[3]); } catch(err) {}
       } else if (arr.length >= 6 && arr[0] === 0x45 && arr[1] === 0x54 && arr[2] === 0x48) {
         const ln = arr[4] | (arr[5] << 8);
         const frame = arr.slice(6, 6 + ln);

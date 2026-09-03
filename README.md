@@ -6,7 +6,7 @@ A from-scratch emulator for Raspberry Pi RP2040 and RP2350 microcontrollers, sup
 
 **Live demo:** `https://danish9661.github.io/Bramble-wasm/` (`web/` deployed via GitHub Pages, `web/.nojekyll` + `/.github/workflows/pages.yml`).
 
-## Current Status: v0.46.0
+## Current Status: v0.47.0
 
 319 tests passing (zero warnings). **RP2040**: Complete — boots MicroPython, CircuitPython, littleOS. **RP2350 RISC-V**: Complete Hazard3 emulation with Zba, Zbb, Zbs, Zcb, Zcmp, and Zbkb extensions. Boots MicroPython Pico 2 RISC-V and SagePico REPL with full semihosting I/O. **RP2350 ARM**: Cortex-M33 mode (`-arch m33`) with RP2350 ROM format and clock-domain peripheral address mapping. Boots to TinyUSB init. **Tri-architecture**: `-arch m0+` / `-arch m33` / `-arch rv32` with automatic firmware detection via UF2 family ID and picobin IMAGE_DEF blocks. **Networking**: Virtual network bus with TAP bridge, multi-instance Ethernet mesh, W5500 live sockets, and software-defined devices.
 

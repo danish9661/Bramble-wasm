@@ -1,6 +1,11 @@
 # Bramble RP2040/RP2350 Emulator - Roadmap
 
-## Current State: v0.46.0-WASM
+## Current State: v0.47.0-WASM
+
+| New | WASM Parity | Complete | `bramble_step` polls (pio/usb/net/vnet/w5500/cyw43/flush/fault/script/watchdog/gdb), GDB RSP WebSocket proxy (`net_proxy.py` WS<->TCP), W5500 dest-aware dial (CON/DISCON/RECV), ETH BroadcastChannel mesh, devtools 18/18 + download, worker threads + `-pthread` SAB variant, `test-wasm.js`, USB strings + SET_INTERFACE, 319/319 + Playwright 0 errors |
+|-----|-------------|----------|-----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
+
+## Previous State: v0.46.0-WASM
 
 | New | WASM Port | Complete | Emscripten 6.0.9 `-O3 -msimd128` `web/bramble.wasm.{js,wasm}` 156K, `src/bramble_wasm.c` exports, `web/` `Examples` SPI/I2C/PWM/ADC/DMA/PIO/USB for RP2040+RP2350 + MicroPython both chips, Playwright verified `log` not `error`, GitHub Pages `web/.nojekyll` `pages.yml` |
 |-----|-----------|----------|------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|

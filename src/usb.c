@@ -337,28 +337,86 @@ static void usb_enum_step(void) {
 
     case USB_ENUM_GET_CONFIG_FULL:
         if (usb_state.ctrl_state == USB_CTRL_DONE) {
-            /* Read wTotalLength from config descriptor */
+            /* Read wTotalLength from 9-byte config header */
             uint8_t *buf = &usb_state.dpram[USB_DPRAM_EP0_BUF];
             usb_state.config_total_len = buf[2] | (buf[3] << 8);
             if (usb_state.config_total_len > 255) usb_state.config_total_len = 255;
             usb_state.ctrl_state = USB_CTRL_IDLE;
             /* GET_CONFIGURATION_DESCRIPTOR, full length */
             usb_send_setup(0x80, 6, 0x0200, 0, usb_state.config_total_len);
+            usb_state.enum_state = USB_ENUM_GET_CONFIG_DATA;
+        }
+        break;
+
+    case USB_ENUM_GET_CONFIG_DATA:
+        if (usb_state.ctrl_state == USB_CTRL_DONE) {
+            /* Parse CDC endpoints now: string requests below will clobber EP0 buf */
+            usb_parse_config_desc();
+            if (usb_state.cdc_in_ep == 0) usb_state.cdc_in_ep = 2;
+            if (usb_state.cdc_out_ep == 0) usb_state.cdc_out_ep = 2;
+            usb_state.ctrl_state = USB_CTRL_IDLE;
+            /* GET_STRING descriptor 0 (language IDs) like a real host */
+            usb_send_setup(0x80, 6, 0x0300, 0, 4);
+            usb_state.enum_state = USB_ENUM_GET_STRING_LANG;
+        }
+        break;
+
+    case USB_ENUM_GET_STRING_LANG:
+        if (usb_state.ctrl_state == USB_CTRL_DONE) {
+            usb_state.ctrl_state = USB_CTRL_IDLE;
+            /* GET_STRING manufacturer (index 1) */
+            usb_send_setup(0x80, 6, 0x0301, 0x0409, 64);
+            usb_state.enum_state = USB_ENUM_GET_STRING_MFR;
+        }
+        break;
+
+    case USB_ENUM_GET_STRING_MFR:
+        if (usb_state.ctrl_state == USB_CTRL_DONE) {
+            usb_state.ctrl_state = USB_CTRL_IDLE;
+            /* GET_STRING product (index 2) */
+            usb_send_setup(0x80, 6, 0x0302, 0x0409, 64);
+            usb_state.enum_state = USB_ENUM_GET_STRING_PROD;
+        }
+        break;
+
+    case USB_ENUM_GET_STRING_PROD:
+        if (usb_state.ctrl_state == USB_CTRL_DONE) {
+            usb_state.ctrl_state = USB_CTRL_IDLE;
+            /* GET_STRING serial (index 3) */
+            usb_send_setup(0x80, 6, 0x0303, 0x0409, 64);
+            usb_state.enum_state = USB_ENUM_GET_STRING_SN;
+        }
+        break;
+
+    case USB_ENUM_GET_STRING_SN:
+        if (usb_state.ctrl_state == USB_CTRL_DONE) {
+            usb_state.ctrl_state = USB_CTRL_IDLE;
+            /* SET_CONFIGURATION 1 */
+            usb_send_setup(0x00, 9, 1, 0, 0);
             usb_state.enum_state = USB_ENUM_SET_CONFIG;
         }
         break;
 
     case USB_ENUM_SET_CONFIG:
         if (usb_state.ctrl_state == USB_CTRL_DONE) {
-            /* Parse config descriptor for CDC endpoints */
-            usb_parse_config_desc();
-            /* If parsing didn't find CDC endpoints (truncated descriptor),
-             * use standard CDC-ACM defaults: EP2 IN, EP2 OUT */
-            if (usb_state.cdc_in_ep == 0) usb_state.cdc_in_ep = 2;
-            if (usb_state.cdc_out_ep == 0) usb_state.cdc_out_ep = 2;
             usb_state.ctrl_state = USB_CTRL_IDLE;
-            /* SET_CONFIGURATION 1 */
-            usb_send_setup(0x00, 9, 1, 0, 0);
+            /* SET_INTERFACE: select CDC data alt-setting (like real host after config) */
+            usb_send_setup(0x01, 0x0B, 0, usb_state.cdc_iface, 0);
+            usb_state.enum_state = USB_ENUM_SET_INTERFACE;
+        }
+        break;
+
+    case USB_ENUM_SET_INTERFACE:
+        if (usb_state.ctrl_state == USB_CTRL_DONE) {
+            usb_state.ctrl_state = USB_CTRL_IDLE;
+            /* SET_LINE_CODING: 115200 baud, 8N1 */
+            usb_state.out_data[0] = 0x00; usb_state.out_data[1] = 0xC2;
+            usb_state.out_data[2] = 0x01; usb_state.out_data[3] = 0x00; /* 115200 LE */
+            usb_state.out_data[4] = 0x00; /* 1 stop bit */
+            usb_state.out_data[5] = 0x00; /* No parity */
+            usb_state.out_data[6] = 0x08; /* 8 data bits */
+            usb_state.out_data_len = 7;
+            usb_send_setup(0x21, 0x20, 0, usb_state.cdc_iface, 7);
             usb_state.enum_state = USB_ENUM_CDC_SET_LINE_CODING;
         }
         break;

@@ -1,5 +1,31 @@
 # Bramble RP2040/RP2350 Emulator - Changelog
 
+## [0.47.0] - 2026-09-03
+
+### Added - WASM parity: polls, GDB proxy, live net, devtools-18, threads, tests
+
+- **WASM step-loop parity** (`src/bramble_wasm.c`): `bramble_step` now drives `pio_step`, `usb_step`, `net_bridge_poll`, `wire_poll`, `cyw43_tap_poll`, `vnet_poll`, `w5500_poll`, `sdcard/emmc_flush`, `fault_check`, `script_poll`, watchdog reboot, and `gdb_should_stop` for both ARM and RV32 paths.
+- **GDB RSP over WebSocket** (`src/gdb.c`, `src/bramble_wasm.c`, `web/index.html`, `web/net_proxy.py`): non-blocking TX/RX queues, `gdb_recv_packet` queue mode with checksum NAK, `bramble_gdb_poll` single-packet (resume/step/stay/detach), `bramble_gdb_enable/is_hit/break/push_rx/pop_tx`, per-frame TX pump, proxy bridges WS `/gdb` to TCP `:3333` (`target remote :3333`).
+- **W5500 dest-aware live dial**: `OPEN/CONNECT/LISTEN/CLOSE` forward `[0x43/0x4C/0x58/0x57, ...]` with DIPR/DPORT from registers; proxy dials real TCP/UDP, returns `STATUS [0x53,sock,1,code]` (`CON`/`DISCON`) and `DATA [sock,len,payload]`; `bramble_w5500_push_rx/status` inject with `RECV` interrupt. UART/ETH demux skips control prefixes.
+- **ETH mesh**: `wire_send_eth_frame` via `BroadcastChannel` binary + optional WS `ETH` header; `bramble_eth_push_rx` into `vnet`; proxy broadcasts `/eth` across machines.
+- **Devtools 18/18 in browser**: `profile`, `callgraph`, `gpio VCD`, `IRQ latency`, `stack check`, `symbols`, `watch`, `fault`, `script`, `expect`, `heatmap`, `bus log` exports plus Devtools panel with Dump+Download (`FS.readFile` Blobs).
+- **Threads**: `web/bramble_worker.js` off-main-thread stepping, `web/serve_coop.py` COOP/COEP server, `build_wasm_threads.sh` `-pthread` variant (`web/bramble.wasm.threads.{js,wasm}`), SAB detect panel with cooperative fallback.
+- **WASM tests**: `test-wasm.js` (Node mirrors ctest + boots hello/gpio/timer/littleos both chips + MicroPython note).
+- **USB host parity**: string descriptors (lang/mfr/prod/serial) + `SET_INTERFACE` states, config parse moved before string phase (EP0 clobber safe), control-stall auto-DONE guard (SagePico retry bound), CDC OUT via `putchar` in WASM, RX routed to USB when `usb_cdc_stdio_active`.
+- **Audit fixes**: GPIO INTR-before-pin + 6 banks + proc1 + hi pins 32-47, interp `mask_msb==31` guard, GPIO subword RMW, IPR `0xC0`, dual RAM icache/jit invalidate, SysTick fast-skip wake, shift `1u`, ROM `ldexp` scales, UART/USB batched flush, USB DPRAM guard, GDB checksum + `MSG_NOSIGNAL`, RV GDB/watchdog/fault/script/flush, storage/ROM/ELF bounds, wire 2KB + buffered ETH, vnet single-buffer TX.
+
+### Known Issues
+
+- **MicroPython REPL**: bundled `micropython_rp2040/rp2350.uf2` panics via `BKPT #0` (`panic()` after ~267k steps) into double-fault lockup (`PC=0xFFFFFFFF`) on native and WASM alike (native parity, not a WASM gap). Needs ELF + symbols to root-cause the panic call site; REPL untested.
+- **ARM SagePico**: as in 0.46.0; string/`SET_INTERFACE` states added but welcome message still not reached.
+- **W5500 live**: needs `web/net_proxy.py` running; direct `AF_INET` unavailable in browser sandbox.
+
+### Tests
+
+- 319/319 tests passing, no regressions. Playwright Chromium: 0 console errors, hello_world UART in serial monitor.
+
+---
+
 ## [0.46.0] - 2026-06-26
 
 ### Added

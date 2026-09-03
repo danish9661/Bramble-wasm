@@ -127,6 +127,19 @@ def handle_browser(conn, path):
                 if op == 0x1:  # text -> treat as bytes
                     pass
                 # forward to all TCP UART clients (nc)
+                # Demux: W5500 control/data + ETH frames stay out of the UART stream
+                if len(data) >= 2 and data[0] in (0x43, 0x58):
+                    handle_w5500_from_browser(conn, data)
+                    continue
+                if len(data) >= 4 and data[0] == 0x57:
+                    handle_w5500_from_browser(conn, data)
+                    continue
+                if len(data) >= 4 and data[0] == 0x4C:
+                    handle_w5500_from_browser(conn, data)
+                    continue
+                if len(data) >= 6 and data[:4] == b"ETH\x00":
+                    handle_eth_from_browser(conn, data[4:])
+                    continue
                 with hub.lock:
                     tcps = list(hub.uart_tcp)
                 for t in tcps:
@@ -134,11 +147,6 @@ def handle_browser(conn, path):
                         t.sendall(data)
                     except Exception:
                         pass
-                # also ETH/W5500 demux if prefixed
-                if len(data) >= 4 and data[0] == 0x57:
-                    handle_w5500_from_browser(conn, data)
-                elif len(data) >= 6 and data[:4] == b"ETH\x00":
-                    handle_eth_from_browser(conn, data[4:])
         finally:
             with hub.lock:
                 hub.uart_ws.discard(conn)
@@ -194,32 +202,209 @@ def handle_browser(conn, path):
         pass
 
 def handle_w5500_from_browser(ws_conn, data):
-    # [0x57, sock, lenLE16, payload] -> real TCP send; reply via WS
+    # Control + data messages from WASM W5500 live bridge:
+    #   CONNECT [0x43, sock, 6, 0, udp, a0, a1, a2, a3, port_lo, port_hi] (11B)
+    #   LISTEN  [0x4C, sock, port_lo, port_hi] (4B)
+    #   CLOSE   [0x58, sock] (2B)
+    #   SEND    [0x57, sock, len_lo, len_hi, payload...]
+    # Replies: DATA [sock, len_lo, len_hi, payload], STATUS [0x53, sock, 1, code]
     try:
-        if len(data) < 4 or data[0] != 0x57:
+        if len(data) >= 11 and data[0] == 0x43:
+            sock, udp = data[1], data[4]
+            ip = f"{data[5]}.{data[6]}.{data[7]}.{data[8]}"
+            port = data[9] | (data[10] << 8)
+            key = (id(ws_conn), sock)
+            old = hub.w5500_socks.pop(key, None)
+            if old:
+                try:
+                    old.close()
+                except Exception:
+                    pass
+            try:
+                st = socket.SOCK_DGRAM if udp else socket.SOCK_STREAM
+                s = socket.socket(socket.AF_INET, st)
+                s.setblocking(False)
+                if udp:
+                    # connected UDP: remember dest, no handshake
+                    s.connect((ip, port))
+                    with hub.lock:
+                        hub.w5500_socks[key] = s
+                    threading.Thread(target=w5500_sock_loop,
+                                     args=(ws_conn, sock, s), daemon=True).start()
+                    ws_send(ws_conn, bytes([0x53, sock, 1, 1]))  # ESTABLISHED/CON
+                else:
+                    err = s.connect_ex((ip, port))
+                    # connect_ex non-blocking: EINPROGRESS expected; poll writability
+                    with hub.lock:
+                        hub.w5500_socks[key] = s
+                    threading.Thread(target=w5500_connect_wait,
+                                     args=(ws_conn, sock, s), daemon=True).start()
+            except Exception as e:
+                print(f"[proxy w5500] dial {ip}:{port} fail: {e}", flush=True)
+                ws_send(ws_conn, bytes([0x53, sock, 1, 0]))  # CLOSED/DISCON
             return
-        sock = data[1]
-        ln = data[2] | (data[3] << 8)
-        payload = data[4:4 + ln]
-        key = (id(ws_conn), sock)
-        with hub.lock:
-            s = hub.w5500_socks.get(key)
-        if s is None:
-            # create on-demand TCP socket; destination comes from prior CONNECT?
-            # For MVP, echo to TCP echo server on localhost:7? Instead, treat as
-            # loopback: reply with same payload after 10ms (lets firmware see RECV).
-            # Real dial needs dest IP/port from W5500 regs which browser doesn't send.
-            # So we just echo for now; full dest-aware proxy needs reg snapshot.
-            # Send back as [sock, lenLE16, payload]
-            out = bytes([sock, len(payload) & 0xFF, (len(payload) >> 8) & 0xFF]) + payload
-            ws_send(ws_conn, out)
+        if len(data) >= 4 and data[0] == 0x4C:
+            sock = data[1]
+            port = data[2] | (data[3] << 8)
+            key = (id(ws_conn), sock)
+            old = hub.w5500_socks.pop(key, None)
+            if old:
+                try:
+                    old.close()
+                except Exception:
+                    pass
+            try:
+                s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+                s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+                s.bind(("0.0.0.0", port))
+                s.listen(1)
+                s.setblocking(False)
+                with hub.lock:
+                    hub.w5500_socks[key] = s
+                threading.Thread(target=w5500_accept_loop,
+                                 args=(ws_conn, sock, s), daemon=True).start()
+            except Exception as e:
+                print(f"[proxy w5500] listen :{port} fail: {e}", flush=True)
+                ws_send(ws_conn, bytes([0x53, sock, 1, 0]))
             return
-        try:
-            s.sendall(payload)
-        except Exception as e:
-            print(f"[proxy w5500] send fail: {e}", flush=True)
+        if len(data) >= 2 and data[0] == 0x58:
+            sock = data[1]
+            key = (id(ws_conn), sock)
+            old = hub.w5500_socks.pop(key, None)
+            if old:
+                try:
+                    old.close()
+                except Exception:
+                    pass
+            return
+        if len(data) >= 4 and data[0] == 0x57:
+            sock = data[1]
+            ln = data[2] | (data[3] << 8)
+            payload = data[4:4 + ln]
+            key = (id(ws_conn), sock)
+            with hub.lock:
+                s = hub.w5500_socks.get(key)
+            if s is None:
+                return
+            try:
+                s.sendall(payload)
+            except Exception as e:
+                print(f"[proxy w5500] send fail: {e}", flush=True)
+            return
     except Exception as e:
         print(f"[proxy w5500] err: {e}", flush=True)
+
+
+def w5500_connect_wait(ws_conn, sock, s):
+    import time
+    deadline = time.time() + 10.0
+    while time.time() < deadline:
+        _, w, _ = select.select([], [s], [], 0.2)
+        if w:
+            err = s.getsockopt(socket.SOL_SOCKET, socket.SO_ERROR)
+            if err == 0:
+                try:
+                    ws_send(ws_conn, bytes([0x53, sock, 1, 1]))
+                except Exception:
+                    pass
+                threading.Thread(target=w5500_sock_loop,
+                                 args=(ws_conn, sock, s), daemon=True).start()
+                return
+            break
+        # dropped WS? stop waiting
+        with hub.lock:
+            live = any(ws_conn in v for v in
+                       (hub.w5500_ws, hub.uart_ws, hub.eth_ws, hub.gdb_ws))
+        if not live:
+            break
+    try:
+        s.close()
+    except Exception:
+        pass
+    with hub.lock:
+        for k, v in list(hub.w5500_socks.items()):
+            if v is s:
+                del hub.w5500_socks[k]
+    try:
+        ws_send(ws_conn, bytes([0x53, sock, 1, 0]))
+    except Exception:
+        pass
+
+
+def w5500_accept_loop(ws_conn, sock, srv):
+    try:
+        while True:
+            r, _, _ = select.select([srv], [], [], 0.5)
+            if not r:
+                with hub.lock:
+                    still = hub.w5500_socks.get((id(ws_conn), sock)) is srv
+                if not still:
+                    return
+                continue
+            try:
+                c, a = srv.accept()
+            except Exception:
+                continue
+            print(f"[proxy w5500] sock {sock} accepted {a}", flush=True)
+            c.setblocking(False)
+            key = (id(ws_conn), sock)
+            with hub.lock:
+                old = hub.w5500_socks.get(key)
+                hub.w5500_socks[key] = c
+            if old and old is not srv:
+                try:
+                    old.close()
+                except Exception:
+                    pass
+            try:
+                srv.close()
+            except Exception:
+                pass
+            try:
+                ws_send(ws_conn, bytes([0x53, sock, 1, 1]))
+            except Exception:
+                pass
+            threading.Thread(target=w5500_sock_loop,
+                             args=(ws_conn, sock, c), daemon=True).start()
+            return
+    except Exception:
+        pass
+
+
+def w5500_sock_loop(ws_conn, sock, s):
+    try:
+        while True:
+            r, _, _ = select.select([s], [], [], 0.5)
+            if not r:
+                with hub.lock:
+                    still = hub.w5500_socks.get((id(ws_conn), sock)) is s
+                if not still:
+                    return
+                continue
+            try:
+                data = s.recv(2048)
+            except Exception:
+                continue
+            if not data:
+                with hub.lock:
+                    if hub.w5500_socks.get((id(ws_conn), sock)) is s:
+                        del hub.w5500_socks[(id(ws_conn), sock)]
+                try:
+                    ws_send(ws_conn, bytes([0x53, sock, 1, 0]))
+                except Exception:
+                    pass
+                try:
+                    s.close()
+                except Exception:
+                    pass
+                return
+            out = bytes([sock, len(data) & 0xFF, (len(data) >> 8) & 0xFF]) + data
+            try:
+                ws_send(ws_conn, out)
+            except Exception:
+                return
+    except Exception:
+        pass
 
 def handle_eth_from_browser(ws_conn, data):
     # broadcast ETH frame to other browsers
