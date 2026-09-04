@@ -803,6 +803,8 @@ void cpu_init(void) {
     cpu.it_pos = 0;
     cpu.it_len = 0;
     cpu.it_suppress = 0;
+    memset(cpu.vfp_s, 0, sizeof(cpu.vfp_s));
+    cpu.vfp_fpscr = 0;
     cpu.vtor = 0x10000100;
 
     /* Initialize memory bus to use cpu.ram */

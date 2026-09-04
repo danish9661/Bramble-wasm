@@ -10,6 +10,7 @@
 #include <stdio.h>
 #include "rp2350_rv/rv_membus.h"
 #include "rp2350_rv/rp2350_memmap.h"
+#include "clocks.h"
 #include "emulator.h"
 
 #define RV_SHARED_RP2040_SYSCFG_BASE     0x40004000u
@@ -209,6 +210,14 @@ uint32_t rv_mem_read32(rv_membus_state_t *bus, uint32_t addr) {
     if (rv_clint_match(addr))
         return rv_clint_read(&bus->clint, addr - RV_CLINT_BASE);
 
+    /* PSM (0x40018000, 16KB with aliases): route straight to the shared
+     * PSM logic. Must NOT use the shared-bus translation: RP2040 PSM
+     * (0x40010000) collides with RP2350 CLOCKS on the ARM bus, so the
+     * translated FRCE writes land in the clocks domain and core1 reset
+     * never fires (RV littleOS hung in multicore_reset_core1's pop). */
+    if ((addr & ~0x3FFFu) == RP2350_PSM_BASE)
+        return psm_read(addr);
+
     /* RP2350-specific peripherals */
     if (rp2350_periph_match(addr))
         return rp2350_periph_read32(&bus->periph, addr);
@@ -248,6 +257,13 @@ void rv_mem_write32(rv_membus_state_t *bus, uint32_t addr, uint32_t val) {
     /* CLINT */
     if (rv_clint_match(addr)) {
         rv_clint_write(&bus->clint, addr - RV_CLINT_BASE, val);
+        return;
+    }
+
+    /* PSM: direct to shared logic (see read path for why translation
+     * cannot be used here). */
+    if ((addr & ~0x3FFFu) == RP2350_PSM_BASE) {
+        psm_write(addr, val, (addr >> 12) & 3);
         return;
     }
 

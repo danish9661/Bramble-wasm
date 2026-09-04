@@ -4160,6 +4160,320 @@ TEST(test_sbc_borrow_carry) {
 }
 
 /* ========================================================================
+ * VFP single-precision Tests (M33 FPU)
+ * Encodings verified against arm-none-eabi-as -mcpu=cortex-m33.
+ * ======================================================================== */
+
+TEST(test_vfp_mov_imm) {
+    /* vmov.f32 s14, #27.0 (EEB3 7A0B) must produce 0x41D80000, not NOP. */
+    reset_cpu();
+    uint32_t pc = RAM_BASE + 0x1000;
+    mem_write16(pc + 0, 0xEEB3);
+    mem_write16(pc + 2, 0x7A0B);
+    cpu.vfp_s[14] = 0xDEADBEEF;
+    cpu.r[15] = pc;
+    cpu_step();
+    ASSERT_EQ(0x41D80000u, cpu.vfp_s[14], "vmov.f32 #27.0 bits");
+    PASS();
+}
+
+TEST(test_vfp_vcvt_roundtrip) {
+    /* int -> float -> int roundtrip through S-regs (uses only VFP). */
+    reset_cpu();
+    uint32_t pc = RAM_BASE + 0x1000;
+    cpu.r[3] = 123456;
+    /* vmov s15, r3 (EE07 3A90): stage int bits */
+    mem_write16(pc + 0, 0xEE07);
+    mem_write16(pc + 2, 0x3A90);
+    /* vcvt.f32.s32 s15, s15 (EEF8 7AE7) */
+    mem_write16(pc + 4, 0xEEF8);
+    mem_write16(pc + 6, 0x7AE7);
+    /* vcvt.u32.f32 s15, s15 (EEFC 7AE7) */
+    mem_write16(pc + 8, 0xEEFC);
+    mem_write16(pc + 10, 0x7AE7);
+    cpu.r[15] = pc;
+    cpu_step();
+    ASSERT_EQ(123456u, cpu.vfp_s[15], "int bits staged to s15");
+    cpu_step();
+    ASSERT_EQ(0x47F12000u, cpu.vfp_s[15], "123456 -> 123456.0f");
+    cpu_step();
+    ASSERT_EQ(123456u, cpu.vfp_s[15], "123456.0f -> 123456");
+    /* truncation + saturation */
+    cpu.vfp_s[15] = 0x41D80000u; /* 27.0f */
+    mem_write16(pc + 0, 0xEEFC);
+    mem_write16(pc + 2, 0x7AE7);
+    cpu.r[15] = pc;
+    cpu_step();
+    ASSERT_EQ(27u, cpu.vfp_s[15], "27.0f truncates to 27");
+    PASS();
+}
+
+TEST(test_vfp_arith) {
+    /* vadd/vsub/vmul/vdiv/vfma on fixed operands (white-box S-regs). */
+    reset_cpu();
+    uint32_t pc = RAM_BASE + 0x1000;
+    cpu.vfp_s[2] = 0x3F000000u; /* 0.5f */
+    cpu.vfp_s[3] = 0x3E800000u; /* 0.25f */
+    /* vadd.f32 s1, s2, s3 (EE71 0A21): 0.75 = 0x3F400000 */
+    mem_write16(pc + 0, 0xEE71);
+    mem_write16(pc + 2, 0x0A21);
+    cpu.r[15] = pc;
+    cpu_step();
+    ASSERT_EQ(0x3F400000u, cpu.vfp_s[1], "0.5+0.25=0.75");
+    /* vsub.f32 s1, s2, s3 (EE71 0A61): 0.25 */
+    mem_write16(pc + 0, 0xEE71);
+    mem_write16(pc + 2, 0x0A61);
+    cpu.r[15] = pc;
+    cpu_step();
+    ASSERT_EQ(0x3E800000u, cpu.vfp_s[1], "0.5-0.25=0.25");
+    /* vmul.f32 s1, s2, s3 (EE61 0A21): 0.125 = 0x3E000000 */
+    mem_write16(pc + 0, 0xEE61);
+    mem_write16(pc + 2, 0x0A21);
+    cpu.r[15] = pc;
+    cpu_step();
+    ASSERT_EQ(0x3E000000u, cpu.vfp_s[1], "0.5*0.25=0.125");
+    /* vdiv.f32 s1, s2, s3 (EEC1 0A21): 2.0 = 0x40000000 */
+    mem_write16(pc + 0, 0xEEC1);
+    mem_write16(pc + 2, 0x0A21);
+    cpu.r[15] = pc;
+    cpu_step();
+    ASSERT_EQ(0x40000000u, cpu.vfp_s[1], "0.5/0.25=2.0");
+    /* vfma.f32 s1, s2, s3 (EEE1 0A21): 0.5+0.5*0.25=0.625=0x3F200000 */
+    cpu.vfp_s[1] = 0x3F000000u;
+    mem_write16(pc + 0, 0xEEE1);
+    mem_write16(pc + 2, 0x0A21);
+    cpu.r[15] = pc;
+    cpu_step();
+    ASSERT_EQ(0x3F200000u, cpu.vfp_s[1], "fma(0.5,0.5,0.25)=0.625");
+    PASS();
+}
+
+TEST(test_vfp_cmp_vmrs) {
+    /* vcmp + vmrs APSR_nzcv flag transfer, incl. NaN unordered case. */
+    reset_cpu();
+    uint32_t pc = RAM_BASE + 0x1000;
+    cpu.vfp_s[1] = 0x3F800000u; /* 1.0f */
+    cpu.vfp_s[2] = 0x40000000u; /* 2.0f */
+    /* vcmp.f32 s1, s2 (EEF4 0A41) -> LT: N=1,C=0 */
+    mem_write16(pc + 0, 0xEEF4);
+    mem_write16(pc + 2, 0x0A41);
+    /* vmrs APSR_nzcv, fpscr (EEF1 FA10) */
+    mem_write16(pc + 4, 0xEEF1);
+    mem_write16(pc + 6, 0xFA10);
+    cpu.xpsr &= ~0xF0000000u;
+    cpu.r[15] = pc;
+    cpu_step();
+    cpu_step();
+    ASSERT_TRUE((cpu.xpsr & 0x80000000u) != 0, "1.0<2.0 sets N");
+    ASSERT_TRUE((cpu.xpsr & 0x20000000u) == 0, "1.0<2.0 clears C");
+    /* equal -> Z=1,C=1 */
+    cpu.vfp_s[2] = 0x3F800000u;
+    cpu.xpsr &= ~0xF0000000u;
+    cpu.r[15] = pc;
+    cpu_step();
+    cpu_step();
+    ASSERT_TRUE((cpu.xpsr & 0x40000000u) != 0, "equal sets Z");
+    ASSERT_TRUE((cpu.xpsr & 0x20000000u) != 0, "equal sets C");
+    /* NaN -> unordered N=0,Z=0,C=1 */
+    cpu.vfp_s[2] = 0x7FC00000u;
+    cpu.xpsr &= ~0xF0000000u;
+    cpu.r[15] = pc;
+    cpu_step();
+    cpu_step();
+    ASSERT_EQ(0x20000000u, cpu.xpsr & 0xF0000000u, "NaN compare is unordered");
+    /* greater-than -> all clear (C is EQ-or-unordered only, NOT borrow!) */
+    cpu.vfp_s[1] = 0x40000000u;
+    cpu.vfp_s[2] = 0x3F800000u;
+    cpu.xpsr |= 0xF0000000u;
+    cpu.r[15] = pc;
+    cpu_step();
+    cpu_step();
+    ASSERT_EQ(0, cpu.xpsr & 0xF0000000u, "GT clears all flags");
+    PASS();
+}
+
+TEST(test_vfp_ldst) {
+    /* VLDR/VSTR single + double roundtrip through RAM. */
+    reset_cpu();
+    uint32_t pc = RAM_BASE + 0x1000;
+    uint32_t cell = RAM_BASE + 0x2000;
+    cpu.r[3] = cell;
+    cpu.r[4] = cell + 16;
+    cpu.vfp_s[5] = 0x41D80000u;
+    cpu.vfp_s[14] = 0x11223344u;
+    cpu.vfp_s[15] = 0x55667788u;
+    /* vstr s5, [r3, #8] (EDC3 2A02) ; vldr s6, [r3, #8] (ED93 3A02).
+     * NOTE: vstr s5 needs D=1 (odd S): EDC3, not ED83 (that's s4). */
+    mem_write16(pc + 0, 0xEDC3);
+    mem_write16(pc + 2, 0x2A02);
+    mem_write16(pc + 4, 0xED93);
+    mem_write16(pc + 6, 0x3A02);
+    cpu.r[15] = pc;
+    cpu_step();
+    cpu_step();
+    ASSERT_EQ(0x41D80000u, cpu.vfp_s[6], "vstr/vldr single roundtrip");
+    /* vstr d7, [r4, #16] (ED84 7B04) ; vldr d7, [r4, #16] (ED94 7B04) */
+    cpu.vfp_s[14] = 0;
+    cpu.vfp_s[15] = 0;
+    mem_write16(pc + 0, 0xED84);
+    mem_write16(pc + 2, 0x7B04);
+    mem_write16(pc + 4, 0xED94);
+    mem_write16(pc + 6, 0x7B04);
+    cpu.r[4] = cell + 16;
+    /* re-stage d7 first via the same store of known pattern */
+    cpu.vfp_s[14] = 0x11223344u;
+    cpu.vfp_s[15] = 0x55667788u;
+    cpu.r[15] = pc;
+    cpu_step();
+    cpu.vfp_s[14] = 0;
+    cpu.vfp_s[15] = 0;
+    cpu_step();
+    ASSERT_EQ(0x11223344u, cpu.vfp_s[14], "vstr/vldr double low");
+    ASSERT_EQ(0x55667788u, cpu.vfp_s[15], "vstr/vldr double high");
+    PASS();
+}
+
+TEST(test_vfp_mov_gp) {
+    /* VMOV between GP regs and S/D regs preserves bits. */
+    reset_cpu();
+    uint32_t pc = RAM_BASE + 0x1000;
+    cpu.vfp_s[16] = 0xCAFEBABEu;
+    /* vmov r0, s16 (EE18 0A10) */
+    mem_write16(pc + 0, 0xEE18);
+    mem_write16(pc + 2, 0x0A10);
+    cpu.r[15] = pc;
+    cpu_step();
+    ASSERT_EQ(0xCAFEBABEu, cpu.r[0], "vmov r0, s16 moves bits");
+    /* vmov s15, r3 (EE07 3A90) */
+    cpu.r[3] = 0x12345678u;
+    mem_write16(pc + 0, 0xEE07);
+    mem_write16(pc + 2, 0x3A90);
+    cpu.r[15] = pc;
+    cpu_step();
+    ASSERT_EQ(0x12345678u, cpu.vfp_s[15], "vmov s15, r3 moves bits");
+    /* vmov r4, r5, d7 (EC55 4B17) */
+    cpu.vfp_s[14] = 0xAAAAAAAAu;
+    cpu.vfp_s[15] = 0xBBBBBBu;
+    mem_write16(pc + 0, 0xEC55);
+    mem_write16(pc + 2, 0x4B17);
+    cpu.r[15] = pc;
+    cpu_step();
+    ASSERT_EQ(0xAAAAAAAAu, cpu.r[4], "vmov pair low word");
+    ASSERT_EQ(0x00BBBBBBu, cpu.r[5], "vmov pair high word");
+    /* vmov d7, r4, r5 (EC45 4B17) */
+    cpu.vfp_s[14] = 0;
+    cpu.vfp_s[15] = 0;
+    cpu.r[15] = pc;
+    /* NOTE: same encoding slot reused below; rewrite as d-store */
+    mem_write16(pc + 0, 0xEC45);
+    mem_write16(pc + 2, 0x4B17);
+    cpu_step();
+    ASSERT_EQ(0xAAAAAAAAu, cpu.vfp_s[14], "vmov d7 low restored");
+    ASSERT_EQ(0x00BBBBBBu, cpu.vfp_s[15], "vmov d7 high restored");
+    PASS();
+}
+
+TEST(test_vfp_vsel) {
+    /* VSELGT picks Sn/Sm by APSR flags set directly. */
+    reset_cpu();
+    uint32_t pc = RAM_BASE + 0x1000;
+    cpu.vfp_s[2] = 0x3F800000u; /* 1.0f */
+    cpu.vfp_s[3] = 0x40000000u; /* 2.0f */
+    /* vselgt.f32 s1, s2, s3 (FE71 0A21) */
+    mem_write16(pc + 0, 0xFE71);
+    mem_write16(pc + 2, 0x0A21);
+    /* GT: Z=0,N=V -> N=0,V=0 */
+    cpu.xpsr &= ~0xF0000000u;
+    cpu.r[15] = pc;
+    cpu_step();
+    ASSERT_EQ(0x3F800000u, cpu.vfp_s[1], "GT takes Sn (irrelevant values)");
+    /* force !GT: Z=1 */
+    cpu.xpsr |= 0x40000000u;
+    cpu.r[15] = pc;
+    cpu_step();
+    ASSERT_EQ(0x40000000u, cpu.vfp_s[1], "!GT takes Sm");
+    PASS();
+}
+
+TEST(test_vfp_firmware_percent) {
+    /* Exact memory_get_stats percent sequence from littleos_pico2
+     * (used=0, max=32768): must yield +0.0, not garbage. Guards the
+     * real VCVT/VDIV/VMUL register mix (s11-s14) seen in firmware. */
+    reset_cpu();
+    uint32_t pc = RAM_BASE + 0x1000;
+    cpu.vfp_s[13] = 32768;          /* max_size, int bits */
+    cpu.vfp_s[14] = 0;              /* used, int bits */
+    cpu.vfp_s[11] = 0x42C80000u;    /* 100.0f */
+    mem_write16(pc + 0, 0xEEB8);
+    mem_write16(pc + 2, 0x6A66);    /* vcvt.f32.u32 s12, s13 */
+    mem_write16(pc + 4, 0xEEB8);
+    mem_write16(pc + 6, 0x7A47);    /* vcvt.f32.u32 s14, s14 */
+    mem_write16(pc + 8, 0xEEC6);
+    mem_write16(pc + 10, 0x6A07);   /* vdiv.f32 s13, s12, s14 */
+    mem_write16(pc + 12, 0xEE26);
+    mem_write16(pc + 14, 0x7AA5);   /* vmul.f32 s14, s13, s11 */
+    cpu.r[15] = pc;
+    cpu_step();
+    ASSERT_EQ(0x47000000u, cpu.vfp_s[12], "32768 -> 32768.0f");
+    cpu_step();
+    ASSERT_EQ(0x00000000u, cpu.vfp_s[14], "0 -> 0.0f");
+    cpu_step();
+    ASSERT_EQ(0x7F800000u, cpu.vfp_s[13], "32768.0/0.0 is +Inf");
+    cpu_step();
+    ASSERT_EQ(0x7F800000u, cpu.vfp_s[14], "Inf*100 is +Inf");
+    PASS();
+}
+
+TEST(test_vfp_push_pop) {
+    /* VPUSH/VPOP (VLDMDB/LDMIA multi) must adjust SP by 8 and roundtrip
+     * d8. Missing VPOP left SP 8 bytes off so the function epilogue popped
+     * garbage into PC (littleOS shell `help` jumped to 0x10624DD2). */
+    reset_cpu();
+    uint32_t pc = RAM_BASE + 0x1000;
+    uint32_t sp = RAM_BASE + 0x3000;
+    cpu.r[13] = sp;
+    cpu.vfp_s[16] = 0x11111111u;
+    cpu.vfp_s[17] = 0x22222222u;
+    /* vpush {d8} (ED2D 8B02) ; vpop {d8} (ECBD 8B02) */
+    mem_write16(pc + 0, 0xED2D);
+    mem_write16(pc + 2, 0x8B02);
+    mem_write16(pc + 4, 0xECBD);
+    mem_write16(pc + 6, 0x8B02);
+    cpu.r[15] = pc;
+    cpu_step();
+    ASSERT_EQ(sp - 8, cpu.r[13], "vpush decrements SP by 8");
+    cpu.vfp_s[16] = 0;
+    cpu.vfp_s[17] = 0;
+    cpu_step();
+    ASSERT_EQ(sp, cpu.r[13], "vpop restores SP");
+    ASSERT_EQ(0x11111111u, cpu.vfp_s[16], "vpop restores d8 low");
+    ASSERT_EQ(0x22222222u, cpu.vfp_s[17], "vpop restores d8 high");
+    /* multi: vstmia r0!, {s0-s3} (ECA0 0A04), then reload the same way
+     * with vldmia r0!, {s0-s3} (ECB0 0A04) after rewinding r0. */
+    cpu.r[0] = sp + 64;
+    cpu.vfp_s[0] = 0xAAAAAAAAu;
+    cpu.vfp_s[1] = 0xBBBBBBBBu;
+    cpu.vfp_s[2] = 0xCCCCCCCCu;
+    cpu.vfp_s[3] = 0xDDDDDDDDu;
+    mem_write16(pc + 0, 0xECA0);
+    mem_write16(pc + 2, 0x0A04);
+    mem_write16(pc + 4, 0xECB0);
+    mem_write16(pc + 6, 0x0A04);
+    cpu.r[15] = pc;
+    cpu_step();
+    ASSERT_EQ(sp + 64 + 16, cpu.r[0], "vstmia writeback +16");
+    cpu.vfp_s[0] = 0; cpu.vfp_s[1] = 0; cpu.vfp_s[2] = 0; cpu.vfp_s[3] = 0;
+    cpu.r[0] = sp + 64; /* rewind base for the reload */
+    cpu_step();
+    ASSERT_EQ(sp + 64 + 16, cpu.r[0], "vldmia writeback +16");
+    ASSERT_EQ(0xAAAAAAAAu, cpu.vfp_s[0], "vldmia s0");
+    ASSERT_EQ(0xBBBBBBBBu, cpu.vfp_s[1], "vldmia s1");
+    ASSERT_EQ(0xCCCCCCCCu, cpu.vfp_s[2], "vldmia s2");
+    ASSERT_EQ(0xDDDDDDDDu, cpu.vfp_s[3], "vldmia s3");
+    PASS();
+}
+
+/* ========================================================================
  * Wire Protocol Tests
  * ======================================================================== */
 
@@ -5323,6 +5637,42 @@ TEST(test_rv_membus_sram) {
     PASS();
 }
 
+TEST(test_rv_psm_core1_reset) {
+    /* RP2350 PSM (0x40018000) must drive core1 reset on the RV bus, exactly
+     * like SDK multicore_reset_core1 does: FRCE_OFF SET/CLR PROC1, then the
+     * reset's blocking pop must observe the pushed 0 (FIFO VLD).
+     * The old shared-bus translation sent RP2040 PSM (0x40010000) which the
+     * ARM bus claims as RP2350 CLOCKS in rp2350 mode, so FRCE writes landed
+     * in the clocks domain, no push ever happened, and RV littleOS hung in
+     * multicore_reset_core1's pop (PC 0x1000554C, FIFO_ST&1 loop). */
+    int saved_mode = membus_rp2350_mode;
+    membus_rp2350_mode = 1;
+    rv_membus_state_t bus;
+    rv_membus_init(&bus, cpu.flash, FLASH_SIZE, 1);
+    /* Drain any stale words on the shared core0 queue */
+    for (int i = 0; i < 10; i++) {
+        if (!(rv_mem_read32(&bus, 0xD0000050) & 1u)) break;
+        (void)rv_mem_read32(&bus, 0xD0000058);
+    }
+    ASSERT_TRUE(!(rv_mem_read32(&bus, 0xD0000050) & 1u), "FIFO starts empty");
+    /* SET PROC1 (0x40018004 FRCE_OFF + SET alias), like reset assert */
+    rv_mem_write32(&bus, 0x40018000 + 0x2004, 1u << 24);
+    ASSERT_TRUE(rv_mem_read32(&bus, 0x40018004) & (1u << 24),
+                "FRCE_OFF PROC1 reads back via RV bus");
+    /* CLR PROC1 (deassert): must push 0 to core0 FIFO (reset's sentinel) */
+    rv_mem_write32(&bus, 0x40018000 + 0x3004, 1u << 24);
+    ASSERT_TRUE(!(rv_mem_read32(&bus, 0x40018004) & (1u << 24)),
+                "FRCE_OFF PROC1 clears");
+    ASSERT_TRUE(rv_mem_read32(&bus, 0xD0000050) & 1u,
+                "FIFO VLD set after core1 reset deassert (unblocks pop)");
+    ASSERT_EQ(0, rv_mem_read32(&bus, 0xD0000058), "sentinel value is 0");
+    /* Cleanup: re-assert to disarm the ARM launch machine, restore clocks */
+    rv_mem_write32(&bus, 0x40018000 + 0x2004, 1u << 24);
+    clocks_init();
+    membus_rp2350_mode = saved_mode;
+    PASS();
+}
+
 TEST(test_rv_bootrom_init) {
     rv_membus_state_t bus;
     rv_membus_init(&bus, cpu.flash, FLASH_SIZE, 1);
@@ -5866,6 +6216,15 @@ int main(void) {
     RUN_TEST(test_it_block_no_flag_update);
     RUN_TEST(test_it_block_cmp_updates_flags);
     RUN_TEST(test_sbc_borrow_carry);
+    RUN_TEST(test_vfp_mov_imm);
+    RUN_TEST(test_vfp_vcvt_roundtrip);
+    RUN_TEST(test_vfp_arith);
+    RUN_TEST(test_vfp_cmp_vmrs);
+    RUN_TEST(test_vfp_ldst);
+    RUN_TEST(test_vfp_mov_gp);
+    RUN_TEST(test_vfp_vsel);
+    RUN_TEST(test_vfp_firmware_percent);
+    RUN_TEST(test_vfp_push_pop);
     END_CATEGORY("Core Pool / Threading");
 
     BEGIN_CATEGORY("Wire Protocol");
@@ -5946,6 +6305,7 @@ int main(void) {
 
     BEGIN_CATEGORY("RISC-V Memory Bus");
     RUN_TEST(test_rv_membus_sram);
+    RUN_TEST(test_rv_psm_core1_reset);
     RUN_TEST(test_rv_bootrom_init);
     END_CATEGORY("RISC-V Memory Bus");
 

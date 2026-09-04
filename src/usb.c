@@ -510,17 +510,12 @@ static void usb_handle_cdc(void) {
         buf_addr = ep_ctrl & 0xFFC0;  /* bits [15:6] */
 
         if (buf_addr > 0 && buf_addr + len <= USBCTRL_DPRAM_SIZE) {
-            /* Output CDC data to stdout only when USB CDC stdio is primary
-             * (i.e. -stdin mode). When UART stdio is also active, UART
-             * already handles stdout and we must not duplicate the data.
+            /* Always emit CDC output to stdout (UART TX has its own path in
+             * uart.c). -stdin selects the *input* target only; conditioning
+             * output on usb_cdc_stdout_enabled is what muted UART shells.
              * WASM exception: the browser has a single serial monitor, so
-             * CDC output always goes there (UART firmware is unaffected:
-             * it takes the putchar path in uart.c, gated the same way). */
-#ifdef __EMSCRIPTEN__
-            if (1) {
-#else
-            if (usb_cdc_stdout_enabled) {
-#endif
+             * CDC output always goes there via putchar (fwrite would bypass
+             * it to console.log). */
 #ifdef __EMSCRIPTEN__
                 /* WASM: route via putchar so browser serial monitor (uart_tx_buf)
                  * captures USB CDC too; fwrite would bypass it to console.log. */
@@ -536,7 +531,6 @@ static void usb_handle_cdc(void) {
 #endif
                 if (__builtin_expect(expect_enabled, 0))
                     expect_append((const char *)&usb_state.dpram[buf_addr], (size_t)len);
-            }
         }
 
         /* Complete the transfer */

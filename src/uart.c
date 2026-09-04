@@ -200,7 +200,11 @@ void uart_write32(int uart_num, uint32_t offset, uint32_t val) {
                 net_bridge_uart_tx(uart_num, ch);
             } else if (wire_uart_active(uart_num)) {
                 wire_send_uart(uart_num, ch);
-            } else if (!usb_cdc_stdout_enabled) {
+            } else {
+                /* Always emit UART TX to stdout. -stdin selects the *input*
+                 * target only; gating output on usb_cdc_stdout_enabled muted
+                 * UART-shell firmwares (e.g. littleOS) entirely whenever
+                 * -stdin was passed. USB CDC output has its own path. */
                 putchar((char)ch);
                 /* H11: batch flushes - only on newline or every 64 bytes */
                 static int uart_flush_ctr = 0;

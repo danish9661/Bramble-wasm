@@ -197,6 +197,11 @@ void clocks_init(void);
 void clocks_reset(void);
 uint32_t clocks_read32(uint32_t addr);
 void clocks_write32(uint32_t addr, uint32_t val);
+/* PSM direct access (shared by ARM bus and RV bus; RV must bypass the
+ * shared-bus translation whose RP2040 PSM address collides with RP2350
+ * CLOCKS). addr is canonical (offset = addr & 0xFFF). */
+uint32_t psm_read(uint32_t addr);
+void psm_write(uint32_t addr, uint32_t val, uint32_t alias);
 
 extern clocks_state_t clocks_state;
 

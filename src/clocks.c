@@ -360,7 +360,7 @@ static void watchdog_write(uint32_t addr, uint32_t val, uint32_t alias) {
  * PSM (Power State Machine)
  * ======================================================================== */
 
-static uint32_t psm_read(uint32_t addr) {
+uint32_t psm_read(uint32_t addr) {
     uint32_t offset = addr & 0xFFF;
     uint32_t mask = psm_all_mask();
 
@@ -378,7 +378,7 @@ static uint32_t psm_read(uint32_t addr) {
     }
 }
 
-static void psm_write(uint32_t addr, uint32_t val, uint32_t alias) {
+void psm_write(uint32_t addr, uint32_t val, uint32_t alias) {
     uint32_t offset = addr & 0xFFF;
     uint32_t mask = psm_all_mask();
     uint32_t proc1_mask = psm_proc1_mask();

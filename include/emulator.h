@@ -120,6 +120,8 @@ typedef struct {
                                      * must not update flags (except CMP/CMN/
                                      * TST); set per-step in cpu_step, cleared
                                      * by exempt handlers. Transient. */
+    uint32_t vfp_s[32];             /* VFP single-precision reg file (bits) */
+    uint32_t vfp_fpscr;             /* FPSCR: only NZCV (bits 31:28) modeled */
 
 } cpu_state_t;
 

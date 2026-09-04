@@ -12,7 +12,9 @@
 
 #include <stdio.h>
 #include <stdint.h>
+#include <stdlib.h>
 #include <string.h>
+#include <math.h>
 #include "emulator.h"
 #include "instructions.h"
 #include "nvic.h"
@@ -865,6 +867,308 @@ unhandled_ldst:
 }
 
 /* ========================================================================
+ * VFP single-precision (M33 FPU, fpv5-sp-d16)
+ *
+ * littleOS Pico 2 builds with -mfloat-abi=softfp: float arithmetic uses
+ * VFP S-regs while doubles use softfloat helpers. The old blanket NOP
+ * left every float computation on stale register garbage (supervisor
+ * "Memory usage high: 1800%", "Temperature: 1800C" from %f prints).
+ *
+ * Register numbering (verified mechanically against arm-none-eabi-as):
+ *   Sd[4:1] = lower[15:12], Sd[0] = upper[6]      (i.e. Sd = Vd:D)
+ *   Sn[4:1] = upper[3:0],   Sn[0] = lower[7]      (i.e. Sn = Vn:N)
+ *   Sm[4:1] = lower[3:0],   Sm[0] = lower[5]      (i.e. Sm = Vm:M)
+ *   Dd/Dm (64-bit moves only) = lower[15:12] / lower[3:0]
+ * S[d] layout: D[d] = S[2d] (low) | S[2d+1]<<32. Only FPSCR NZCV modeled.
+ * 32-bit VFP insns honor IT predication via the generic cpu_step path.
+ * NOTE: VFP state is not saved across dual-core context switches
+ * (bind/unbind); all current workloads run VFP on one core only.
+ * ======================================================================== */
+static inline uint32_t vfp_s_get(int s) { return cpu.vfp_s[s & 31]; }
+static inline void vfp_s_set(int s, uint32_t v) { cpu.vfp_s[s & 31] = v; }
+static inline float vfp_f_get(int s) {
+    float f; uint32_t v = vfp_s_get(s); memcpy(&f, &v, 4); return f;
+}
+static inline void vfp_f_set(int s, float f) {
+    uint32_t v; memcpy(&v, &f, 4); vfp_s_set(s, v);
+}
+static inline uint64_t vfp_d_get(int d) {
+    d &= 15;
+    return (uint64_t)vfp_s_get(2 * d) | ((uint64_t)vfp_s_get(2 * d + 1) << 32);
+}
+static inline void vfp_d_set(int d, uint64_t v) {
+    d &= 15;
+    vfp_s_set(2 * d, (uint32_t)v);
+    vfp_s_set(2 * d + 1, (uint32_t)(v >> 32));
+}
+static inline int vfp_Sd(uint16_t upper, uint16_t lower) {
+    return (((lower >> 12) & 0xF) << 1) | ((upper >> 6) & 1);
+}
+static inline int vfp_Sn(uint16_t upper, uint16_t lower) {
+    return ((upper & 0xF) << 1) | ((lower >> 7) & 1);
+}
+static inline int vfp_Sm(uint16_t upper, uint16_t lower) {
+    (void)upper; return ((lower & 0xF) << 1) | ((lower >> 5) & 1);
+}
+
+/* VFPExpandImm for 32-bit VMOV immediate (imm8 = abcdefgh). */
+static uint32_t vfp_expand_imm(uint8_t imm8) {
+    uint32_t a = ((uint32_t)imm8 >> 7) & 1u;
+    uint32_t b = ((uint32_t)imm8 >> 6) & 1u;
+    uint32_t not_b = b ^ 1u;
+    uint32_t exp = (not_b << 7) | (b << 6) | (b << 5) | (b << 4) |
+                   (b << 3) | (b << 2) | (((uint32_t)imm8 >> 5) & 1u) << 1 |
+                   (((uint32_t)imm8 >> 4) & 1u);
+    uint32_t frac = ((uint32_t)imm8 & 0xFu) << 19;
+    return (a << 31) | (exp << 23) | frac;
+}
+
+/* float -> int32, round toward zero, NaN -> 0, saturate (ARM VCVT rule). */
+static int32_t vfp_f2i(float f) {
+    if (isnan(f)) return 0;
+    if (f >= 2147483648.0f) return INT32_MAX;
+    if (f <= -2147483648.0f) return INT32_MIN;
+    return (int32_t)f;
+}
+
+/* float -> uint32, round toward zero, NaN -> 0, saturate (ARM VCVT rule). */
+static uint32_t vfp_f2u(float f) {
+    if (isnan(f)) return 0;
+    if (f <= 0.0f) return 0;
+    if (f >= 4294967296.0f) return UINT32_MAX;
+    if (f < 2147483648.0f) return (uint32_t)(int32_t)f;
+    return (uint32_t)((int32_t)(f - 2147483648.0f)) + 0x80000000u;
+}
+
+/* VCMP(E).F32: NZCV into FPSCR (V always 0). ARM rule: C is set for
+ * equal and unordered ONLY, not greater-than (unlike SUB borrow!).
+ * GT must yield all-clear or BHI/BLS invert (littleOS shell crash).
+ * APSR is untouched (a following VMRS makes flags visible). */
+static void vfp_cmp(float a, float b) {
+    uint32_t nzcv;
+    if (isnan(a) || isnan(b))      nzcv = FLAG_C;
+    else if (a == b)               nzcv = FLAG_Z | FLAG_C;
+    else if (a < b)                nzcv = FLAG_N;
+    else                           nzcv = 0;
+    cpu.vfp_fpscr = nzcv;
+}
+
+/* Execute a VFP instruction in group 0x1D (EC/ED/EE/EF uppers).
+ * Returns 1 if the shape is VFP (handled or explicit NOP), 0 otherwise
+ * (caller falls through to TT/exclusives/LDRD/etc.). */
+static int t32_vfp(uint32_t pc, uint16_t upper, uint16_t lower) {
+    int sub = (lower >> 8) & 0xF;
+    int is_vfp_ls = (sub == 0xA || sub == 0xB) &&
+        ((upper & 0x0F00) == 0x0C00 || (upper & 0x0F00) == 0x0D00);
+    /* EC pair-move VMOV FIRST: it overlaps EC+101x multi shapes, but its
+     * U[7:4] of 0100/0101 never collides with multi's 1001/1010/1011/001x.
+     * Direction lives in U[4] (EC55: Rt,Rt2 <- Dm; EC45: Dm <- Rt,Rt2),
+     * so match (upper&0x0FE0)==0x0C40 to cover both (0x0C50 missed EC45
+     * and silently dropped `vmov Dm, Rt, Rt2`). */
+    if ((upper & 0x0FE0) == 0x0C40 && (lower & 0x0FF0) == 0x0B10) {
+        int dir = (upper >> 4) & 1; /* 1: Rt,Rt2 <- Dm, 0: Dm <- Rt,Rt2 */
+        int Rt = (lower >> 12) & 0xF, Rt2 = upper & 0xF, Dm = lower & 0xF;
+        if (dir) {
+            uint64_t v = vfp_d_get(Dm);
+            if (Rt != 15) cpu.r[Rt] = (uint32_t)v;
+            if (Rt2 != 15) cpu.r[Rt2] = (uint32_t)(v >> 32);
+        } else {
+            vfp_d_set(Dm, (uint64_t)cpu.r[Rt] | ((uint64_t)cpu.r[Rt2] << 32));
+        }
+        return 1;
+    }
+    /* VLDM/VSTM multi (incl. VPUSH/VPOP): EC+101x always multi;
+     * ED+101x with W==1 is STMDB-form multi. (ED+101x+W==0 is single,
+     * handled below.) */
+    if (is_vfp_ls &&
+        (((upper & 0x0F00) == 0x0C00) ||
+         (((upper >> 5) & 1) && ((upper & 0x0F00) == 0x0D00)))) {
+        int U = (upper >> 7) & 1, P = (upper >> 8) & 1;
+        int Ld = (upper >> 4) & 1, Rn = upper & 0xF;
+        int is64 = (sub == 0xB);
+        int start_s = is64 ? (((lower >> 12) & 0xF) * 2)
+                           : ((((lower >> 12) & 0xF) << 1) | ((upper >> 6) & 1));
+        int count = lower & 0xFF; /* words */
+        if (count == 0) return 1;
+        uint32_t base = cpu.r[Rn];
+        uint32_t start;
+        if (!P && U)       start = base;                    /* IA */
+        else if (P && U)   start = base + 4;                /* IB */
+        else if (!P && !U) start = base - 4u * (uint32_t)count + 4; /* DA */
+        else               start = base - 4u * (uint32_t)count;     /* DB */
+        for (int i = 0; i < count; i++) {
+            uint32_t a = start + 4u * (uint32_t)i;
+            if (Ld) vfp_s_set(start_s + i, mem_read32(a));
+            else    mem_write32(a, vfp_s_get(start_s + i));
+        }
+        if (Rn != 15)
+            cpu.r[Rn] = U ? base + 4u * (uint32_t)count
+                          : base - 4u * (uint32_t)count;
+        return 1;
+    }
+    /* ED single (W==0): VLDR/VSTR */
+    if ((upper & 0x0F00) == 0x0D00) {
+        if (sub != 0xA && sub != 0xB) return 0;
+        int is64 = (sub == 0xB);
+        int U = (upper >> 7) & 1, W = (upper >> 5) & 1;
+        int Ld = (upper >> 4) & 1, Rn = upper & 0xF;
+        int P = (upper >> 8) & 1;
+        int32_t off = (int32_t)(lower & 0xFF) * 4;
+        if (!U) off = -off;
+        uint32_t base = (Rn == 15) ? ((pc + 4) & ~3u) : cpu.r[Rn];
+        uint32_t addr = P ? (uint32_t)((int32_t)base + off) : base;
+        if (is64) {
+            int Dd = (lower >> 12) & 0xF;
+            if (Ld) {
+                uint32_t lo = mem_read32(addr);
+                uint32_t hi = mem_read32(addr + 4);
+                vfp_d_set(Dd, (uint64_t)lo | ((uint64_t)hi << 32));
+            } else {
+                uint64_t v = vfp_d_get(Dd);
+                mem_write32(addr, (uint32_t)v);
+                mem_write32(addr + 4, (uint32_t)(v >> 32));
+            }
+        } else {
+            int Sd = vfp_Sd(upper, lower);
+            if (Ld) vfp_s_set(Sd, mem_read32(addr));
+            else    mem_write32(addr, vfp_s_get(Sd));
+        }
+        if (W && Rn != 15)
+            cpu.r[Rn] = P ? addr : (uint32_t)((int32_t)base + off);
+        return 1;
+    }
+
+    /* EE group */
+    if ((upper & 0x0F00) != 0x0E00) return 0;
+    {
+        int u74 = (upper >> 4) & 0xF;   /* includes D bit */
+        int Sd = vfp_Sd(upper, lower);
+
+        /* VMOV.F32 immediate: U[7:4]==1011 (D-masked), L[7:4]==0000 */
+        if ((u74 & ~0x4) == 0xB && ((lower >> 4) & 0xF) == 0x0 &&
+            ((lower >> 8) & 0xF) == 0xA) {
+            uint8_t imm8 = (uint8_t)(((upper & 0xF) << 4) | (lower & 0xF));
+            vfp_s_set(Sd, vfp_expand_imm(imm8));
+            return 1;
+        }
+
+        /* VMOV between GP reg and S reg: U[7:4] 0000/0001, L[11:8]==1010 */
+        if (u74 <= 1 && ((lower >> 8) & 0xF) == 0xA) {
+            int dir = (upper >> 4) & 1; /* 1: Rt <- Sn, 0: Sn <- Rt */
+            int Rt = (lower >> 12) & 0xF, Sn = vfp_Sn(upper, lower);
+            if (dir) { if (Rt != 15) cpu.r[Rt] = vfp_s_get(Sn); }
+            else     { vfp_s_set(Sn, cpu.r[Rt]); }
+            return 1;
+        }
+
+        /* 3-operand data processing: opc = {U[7],U[5],U[4]}, N = L[6].
+         * (The old (u74&~4)==3 gate only matched VADD/VSUB and silently
+         * NOP'd VMUL/VDIV/VMLA/VFMA.) */
+        {
+            int opc3 = (((upper >> 7) & 1) << 2) | ((upper >> 4) & 3);
+            if (((lower >> 8) & 0xF) == 0xA && (opc3 <= 4 || opc3 == 6)) {
+            int opc = opc3;
+            int N = (lower >> 6) & 1;
+            int Sn = vfp_Sn(upper, lower), Sm = vfp_Sm(upper, lower);
+            float n = vfp_f_get(Sn), m = vfp_f_get(Sm), d = vfp_f_get(Sd), r = 0;
+            switch (opc) {
+            case 0: r = N ? d - n * m : d + n * m; break;          /* VMLS/VMLA */
+            case 1: r = N ? -(d - n * m) : -(d + n * m); break;    /* VNMLS/VNMLA */
+            case 2: r = n * m; if (N) r = -r; break;               /* VMUL/VNMUL */
+            case 3: r = N ? n - m : n + m; break;                  /* VSUB/VADD */
+            case 4: r = n / m; break;                              /* VDIV */
+            case 6: { /* VFMA/VFMS: fused (single rounding via double) */
+                double dd = (double)d + (N ? -1.0 : 1.0) * (double)n * (double)m;
+                r = (float)dd;
+                break;
+            }
+            default:
+                if (cpu.debug_enabled)
+                    fprintf(stderr, "[T32] VFP unhandled 3-op opc=%d @ PC=0x%08X\n",
+                            opc, pc);
+                return 1;
+            }
+            vfp_f_set(Sd, r);
+            return 1;
+            }
+        }
+
+        /* VMRS/VMSR: U = EEF1/EEE1, L[11:0] == 0xA10. Checked BEFORE the
+         * 1-register group below: EEF1 FA10 also matches that group's
+         * gate and would execute as VNEG (vmrs never ran, so VCMP-set
+         * flags never reached APSR). Exact match collides with nothing:
+         * 1-reg ops use L[7:0] 0x41/0x40/0xC0/0xC1/0xE7/0xC7/0x67/0x47. */
+        if (((upper == 0xEEF1) || (upper == 0xEEE1)) &&
+            (lower & 0x0FFF) == 0x0A10) {
+            int Rt = (lower >> 12) & 0xF;
+            if (upper == 0xEEF1) { /* VMRS */
+                if (Rt == 15) cpu.xpsr = (cpu.xpsr & ~0xF0000000u) |
+                                                 (cpu.vfp_fpscr & 0xF0000000u);
+                else cpu.r[Rt] = cpu.vfp_fpscr;
+            } else {               /* VMSR */
+                cpu.vfp_fpscr = (cpu.vfp_fpscr & ~0xF8000000u) |
+                                (cpu.r[Rt] & 0xF8000000u);
+            }
+            return 1;
+        }
+
+        /* 1-register ops + VCMP + VCVT-int: U[7:4] 1011/1111 (D-masked) */
+        if ((u74 & ~0x4) == 0xB && ((lower >> 8) & 0xF) == 0xA) {
+            /* VCVT between float and int: U[3] == 1 */
+            if (upper & 0x0008) {
+                int to_fp = ((upper >> 2) & 1) == 0; /* U[2]: 0 int->fp */
+                if (to_fp) {
+                    int sgned = (lower >> 7) & 1;    /* L[7]: 1 signed */
+                    int Sm = vfp_Sm(upper, lower);
+                    uint32_t iv = vfp_s_get(Sm);     /* integer bit pattern */
+                    vfp_f_set(Sd, sgned ? (float)(int32_t)iv : (float)iv);
+                } else {
+                    int sgned = upper & 1;           /* U[0]: 1 signed */
+                    int Sm = vfp_Sm(upper, lower);
+                    float f = vfp_f_get(Sm);
+                    uint32_t iv = sgned ? (uint32_t)vfp_f2i(f) : vfp_f2u(f);
+                    vfp_s_set(Sd, iv);
+                }
+                return 1;
+            }
+            /* VCMP(E): U[2] == 1, E = L[7] */
+            if (upper & 0x0004) {
+                int Sm = vfp_Sm(upper, lower);
+                vfp_cmp(vfp_f_get(Sd), vfp_f_get(Sm));
+                return 1;
+            }
+            /* MOV/NEG/ABS/SQRT by {U[0], L[7]} */
+            {
+                int Sm = vfp_Sm(upper, lower);
+                float m = vfp_f_get(Sm), r = m;
+                int sel = (((upper & 1) << 1) | ((lower >> 7) & 1));
+                if (sel == 2) r = -m;                /* VNEG */
+                else if (sel == 1) r = fabsf(m);     /* VABS */
+                else if (sel == 3) r = sqrtf(m);     /* VSQRT */
+                vfp_f_set(Sd, r);
+                return 1;
+            }
+        }
+    }
+    return 0;
+}
+
+/* VSEL (group 0x1F, FE uppers): cond2 = U[5:4] (00 EQ, 01 VS, 10 GE, 11 GT).
+ * Sd = cond ? Sn : Sm. Returns 1 if VSEL-shaped, 0 otherwise. */
+static int t32_vsel(uint32_t pc, uint16_t upper, uint16_t lower) {
+    (void)pc;
+    if ((upper & 0xFF00) != 0xFE00) return 0;
+    if (((lower >> 8) & 0xF) != 0xA) return 0;
+    int c2 = (upper >> 4) & 3;
+    int cond = (c2 == 0) ? 0x0 : (c2 == 1) ? 0x6 : (c2 == 2) ? 0xA : 0xC;
+    int Sd = vfp_Sd(upper, lower);
+    int Sn = vfp_Sn(upper, lower);
+    int Sm = vfp_Sm(upper, lower);
+    vfp_s_set(Sd, t32_check_cond((uint8_t)cond) ? vfp_s_get(Sn) : vfp_s_get(Sm));
+    return 1;
+}
+
+/* ========================================================================
  * Main 32-bit Thumb-2 dispatcher
  * Called with current pc (address of upper halfword), upper and lower halfwords.
  * Returns 1 if instruction was handled, 0 if unknown (caller triggers HardFault).
@@ -880,13 +1184,13 @@ int thumb32_step(uint32_t pc, uint16_t upper, uint16_t lower) {
     /* Group 11101: E8xx-EFxx                                              */
     /* ------------------------------------------------------------------ */
     if (top5 == 0x1D) {
-        /* Coprocessor / VFP / FPU space (0xEC-0xEF uppers): M33 FPU
-         * instructions (e.g. EE10 0430 cfmvrdh) live in this group, NOT
-         * in the 0x1E group. No FPU is implemented; skip as NOP.
-         * Without this they fell into shifted-register DP below and
-         * corrupted registers (littleos_pico2: r4 clobbered across a
-         * runtime_init call, cascading into null calls and lockup). */
+        /* VFP single-precision (M33 FPU): real execution via t32_vfp;
+         * unrecognized coprocessor shapes stay NOP (previous behavior:
+         * the blanket skip below also covered MVE etc.). Without the
+         * blanket, VFP fell into shifted-register DP and corrupted
+         * registers (littleos_pico2: r4 clobbered across runtime_init). */
         if ((upper & 0xFC00) == 0xEC00) {
+            t32_vfp(pc, upper, lower);
             return 1;
         }
         /* ARMv8-M TT (Test Target, TrustZone): upper = 0xE840|Rn,
@@ -1064,6 +1368,9 @@ int thumb32_step(uint32_t pc, uint16_t upper, uint16_t lower) {
     /* Group 11111: F8xx-FFxx                                              */
     /* ------------------------------------------------------------------ */
     if (top5 == 0x1F) {
+        /* VSEL.F32 (M33 FPU, FE uppers): select on APSR flags. Must
+         * precede misc/ldst: as LDR.W it would corrupt memory. */
+        if (t32_vsel(pc, upper, lower)) return 1;
         /* Check misc 32-bit first (SDIV, UDIV, MUL, CLZ etc.) */
         if (t32_misc(pc, upper, lower)) return 1;
         /* Load/Store single */
