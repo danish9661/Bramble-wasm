@@ -16,4 +16,8 @@
  */
 int thumb32_step(uint32_t pc, uint16_t upper, uint16_t lower);
 
+/* Evaluate an ARM condition code (0-15) against current XPSR flags.
+ * Shared by the IT-block predication check in cpu_step(). */
+int t32_check_cond(uint8_t cond);
+
 #endif /* THUMB32_H */

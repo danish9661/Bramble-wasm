@@ -998,9 +998,12 @@ void instr_mrs(uint32_t instr) {
 // ============================================================================
 
 void instr_it(uint16_t instr) {
-    (void)instr;
+    /* Arm IT-block predication state; following instructions are checked
+     * in cpu_step() and skipped when their condition is false. */
+    it_set_state(instr);
     if (cpu.debug_enabled)
-        printf("[CPU] IT instruction at 0x%08X (limited support)\n", cpu.r[15]);
+        printf("[CPU] IT base=0x%X mask=0x%X at 0x%08X\n",
+               (instr >> 4) & 0xF, instr & 0xF, cpu.r[15]);
 }
 
 void instr_dsb(uint32_t instr) { (void)instr; }

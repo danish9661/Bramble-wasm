@@ -175,10 +175,12 @@ static inline uint16_t cpu_fetch16_fast(uint32_t pc) {
         return val;
     }
 
-    if (pc >= RAM_BASE && pc + 1 < RAM_TOP) {
+    /* Active RAM window (520KB SRAM in RP2350/M33 mode). Must go through
+     * the active pointer — cpu.ram holds stale zeros in M33 mode. */
+    {
         uint16_t val;
-        memcpy(&val, &cpu.ram[pc - RAM_BASE], 2);
-        return val;
+        if (mem_fetch16_ram(pc, &val))
+            return val;
     }
 
     return mem_read16(pc);
@@ -615,8 +617,15 @@ static void dispatch_rev_ba(uint16_t instr) {
     }
 }
 
-/* Hints (0xBF) */
+/* Hints (0xBF): low nibble 0 => NOP-compatible hint, else IT.
+ * The old code keyed on bits[7:4] alone, so e.g. `it cc` (0xBF38)
+ * decoded as WFI and put the core to sleep (littleos_pico2 froze
+ * in SDK PLL setup). */
 static void dispatch_hints_bf(uint16_t instr) {
+    if ((instr & 0x000F) != 0) {
+        instr_it(instr);
+        return;
+    }
     uint8_t op = (instr >> 4) & 0xF;
     switch (op) {
         case 0x0: instr_nop(instr); break;
@@ -624,7 +633,7 @@ static void dispatch_hints_bf(uint16_t instr) {
         case 0x2: instr_wfe(instr); break;
         case 0x3: instr_wfi(instr); break;
         case 0x4: instr_sev(instr); break;
-        default:  instr_it(instr); break;
+        default:  instr_nop(instr); break; /* CSDB etc.: treated as NOP */
     }
 }
 
@@ -789,6 +798,10 @@ void cpu_init(void) {
     cpu.current_irq = 0xFFFFFFFF;
     cpu.primask = 0;
     cpu.control = 0;
+    cpu.it_base = 0;
+    cpu.it_mask = 0;
+    cpu.it_pos = 0;
+    cpu.it_len = 0;
     cpu.vtor = 0x10000100;
 
     /* Initialize memory bus to use cpu.ram */
@@ -820,9 +833,9 @@ void cpu_reset_from_flash(void) {
     uint32_t initial_sp = mem_read32(cpu.vtor + 0x00);
     uint32_t reset_vector = mem_read32(cpu.vtor + 0x04);
 
-    if (initial_sp < RAM_BASE || initial_sp > RAM_BASE + RAM_SIZE) {
+    if (initial_sp < RAM_BASE || initial_sp > mem_ram_top()) {
         fprintf(stderr, "[Boot] ERROR: Invalid SP 0x%08X (not in RAM 0x%08X-0x%08X)\n",
-               initial_sp, RAM_BASE, RAM_BASE + RAM_SIZE);
+               initial_sp, RAM_BASE, mem_ram_top());
         cpu.r[15] = 0xFFFFFFFF;
         return;
     }
@@ -864,12 +877,74 @@ int cpu_is_halted(void) {
         return 0;
     }
 
-    /* Execute from RAM */
-    if (pc >= RAM_BASE && pc < RAM_TOP) {
+    /* Execute from RAM (window follows active SRAM size: 520KB on RP2350) */
+    if (pc >= RAM_BASE && pc < mem_ram_top()) {
         return 0;
     }
 
     return 1;
+}
+
+/* ========================================================================
+ * IT-Block (If-Then) Predication Helpers
+ *
+ * Thumb-2 IT sets predication state consumed by up to 4 following
+ * instructions. Straight-line blocks (what compilers emit) are handled
+ * exactly; exception entry/return save/restore the state across nesting
+ * (handlers run fresh). Taken branches inside a block are not generated
+ * by compilers and abandon the block implicitly on real HW; we do not
+ * track those (documented limitation).
+ * Mask decoding (verified against arm-none-eabi-as: itte cc=0xBF3A,
+ * itet cc=0xBF36, itt cc=0xBF3C, it cc=0xBF38): block length is
+ * 4 - ctz(mask); follower 1 uses the base cond; follower i (i>=2) uses
+ * the base cond iff mask bit (4-i) is set, else the inverted cond.
+ * ======================================================================== */
+
+/* Clear predication state (fresh block boundary) */
+static inline void it_clear(void) {
+    cpu.it_base = 0;
+    cpu.it_mask = 0;
+    cpu.it_pos = 0;
+    cpu.it_len = 0;
+}
+
+/* Count trailing zeros of a 4-bit mask (block length = 4 - ctz) */
+static inline uint32_t it_mask_len(uint32_t mask) {
+    uint32_t n = 0;
+    while (n < 4 && ((mask & 1) == 0)) {
+        mask >>= 1;
+        n++;
+    }
+    return 4 - n;
+}
+
+/* Arm predication state from an IT instruction word (called by instr_it) */
+void it_set_state(uint16_t instr) {
+    cpu.it_base = (instr >> 4) & 0xF;
+    cpu.it_mask = instr & 0xF;
+    cpu.it_pos = 0;
+    cpu.it_len = (uint8_t)it_mask_len(cpu.it_mask);
+}
+
+/* Check predication for the instruction at pc. Returns 1 if it must be
+ * skipped (condition false). Consumes one IT slot as a side effect. */
+static inline int it_check_skip(uint32_t pc) {
+    if (cpu.it_len == 0) return 0;
+    /* A nested IT restarts predication (UNPREDICTABLE on HW; be lenient) */
+    uint16_t iw = cpu_fetch16_fast(pc);
+    if ((iw >> 8) == 0xBF && (iw & 0x000F) != 0) return 0;
+    uint8_t cond = cpu.it_base;
+    if (cpu.it_pos > 0) {
+        uint8_t then_bit = (cpu.it_mask >> (4 - cpu.it_pos)) & 1;
+        if (!then_bit) cond ^= 1;
+    }
+    int pass = t32_check_cond(cond);
+    cpu.it_pos++;
+    if (cpu.it_pos >= cpu.it_len) {
+        cpu.it_len = 0;
+        cpu.it_pos = 0;
+    }
+    return !pass;
 }
 
 /* ========================================================================
@@ -899,6 +974,14 @@ void cpu_exception_entry(uint32_t vector_num) {
                    cpu.r[15]);
         }
         cores[ac].is_halted = 1;
+        { FILE *f = fopen("/tmp/bramble_arena.bin", "w");
+          if (f) {
+            for (uint32_t a = 0x20004F2Cu; a < 0x20043A8Cu; a += 4) {
+              uint32_t w = mem_read32(a);
+              if (w >= 0x20043900u && w <= 0x20045000u) fprintf(f, "%08X: %08X\n", a, w);
+            }
+            fclose(f);
+          } }
         cpu.r[15] = 0xFFFFFFFF;
         return;
     }
@@ -910,8 +993,13 @@ void cpu_exception_entry(uint32_t vector_num) {
     /* Push previous exception onto nesting stack */
     if (*p_exception_depth < MAX_EXCEPTION_DEPTH) {
         exception_stack[*p_exception_depth] = cpu.current_irq;
+        cores[ac].it_stack[*p_exception_depth] =
+            (uint32_t)cpu.it_base | ((uint32_t)cpu.it_mask << 4) |
+            ((uint32_t)cpu.it_pos << 8) | ((uint32_t)cpu.it_len << 12);
         (*p_exception_depth)++;
     }
+    /* Handlers start with fresh predication state */
+    it_clear();
 
     cpu.current_irq = vector_num;
 
@@ -1141,6 +1229,11 @@ void cpu_exception_return(uint32_t lr_value) {
             if (*p_exception_depth > 0) {
                 (*p_exception_depth)--;
                 cpu.current_irq = exception_stack[*p_exception_depth];
+                uint32_t it = cores[ac].it_stack[*p_exception_depth];
+                cpu.it_base = it & 0xF;
+                cpu.it_mask = (it >> 4) & 0xF;
+                cpu.it_pos = (it >> 8) & 0xF;
+                cpu.it_len = (it >> 12) & 0xF;
             } else {
                 cpu.current_irq = 0xFFFFFFFF;
             }
@@ -1208,6 +1301,13 @@ static void __attribute__((hot)) timing_tick(uint32_t cycles) {
 
 __attribute__((hot)) void cpu_step(void) {
     uint32_t pc = cpu.r[15];
+    /* IT-block predication (rare path: single predictable branch) */
+    if (__builtin_expect(cpu.it_len != 0, 0) && it_check_skip(pc)) {
+        uint16_t iw = cpu_fetch16_fast(pc);
+        cpu.r[15] = pc + (((iw >> 11) >= 0x1D) ? 4 : 2);
+        timing_tick(1);
+        return;
+    }
 
     /* Fast path: most PCs are in flash (0x10000000-0x101FFFFF) */
     if (__builtin_expect(pc - FLASH_BASE < FLASH_SIZE, 1)) {
@@ -1231,12 +1331,16 @@ __attribute__((hot)) void cpu_step(void) {
         }
         goto pc_valid;
     }
-    if (pc >= RAM_BASE && pc < RAM_TOP) goto pc_valid;
+    if (pc >= RAM_BASE && pc < mem_ram_top()) goto pc_valid;
     if (pc == 0xFFFFFFFF) return;
 
     /* HardFault: PC out of executable range */
     {
         uint32_t handler = mem_read32(cpu.vtor + EXC_HARDFAULT * 4);
+        { static int n = 0; if (n < 1) { n++;
+          FILE *f = fopen("/tmp/bramble_ram2.bin", "w");
+          if (f) { for (uint32_t a = 0x20004090; a < 0x20004170; a += 4) { uint32_t w = mem_read32(a); fwrite(&w, 1, 4, f); } fclose(f); }
+        } }
         if (handler && handler != 0xFFFFFFFF) {
             if (cpu.debug_enabled) {
                 printf("[CPU] HardFault: PC out of bounds (0x%08X) -> handler 0x%08X\n",
@@ -1531,6 +1635,10 @@ int cpu_bind_core_context(int core_id, cpu_bind_context_t *ctx) {
     ctx->primask = cpu.primask;
     ctx->faultmask = cpu.faultmask;
     ctx->control = cpu.control;
+    ctx->it_base = cpu.it_base;
+    ctx->it_mask = cpu.it_mask;
+    ctx->it_pos = cpu.it_pos;
+    ctx->it_len = cpu.it_len;
     ctx->active_core = get_active_core();
 
     memcpy(cpu.r, cores[core_id].r, sizeof(cpu.r));
@@ -1543,6 +1651,10 @@ int cpu_bind_core_context(int core_id, cpu_bind_context_t *ctx) {
     cpu.primask       = cores[core_id].primask;
     cpu.faultmask     = cores[core_id].faultmask;
     cpu.control       = cores[core_id].control;
+    cpu.it_base       = cores[core_id].it_base;
+    cpu.it_mask       = cores[core_id].it_mask;
+    cpu.it_pos        = cores[core_id].it_pos;
+    cpu.it_len        = cores[core_id].it_len;
 
     /* Use RP2350 SRAM if in RP2350 mode, otherwise RP2040 SRAM */
     if (membus_rp2350_mode && rp2350_sram_ptr) {
@@ -1569,6 +1681,10 @@ void cpu_unbind_core_context(int core_id, const cpu_bind_context_t *ctx) {
     cores[core_id].primask       = cpu.primask;
     cores[core_id].faultmask     = cpu.faultmask;
     cores[core_id].control       = cpu.control;
+    cores[core_id].it_base       = cpu.it_base;
+    cores[core_id].it_mask       = cpu.it_mask;
+    cores[core_id].it_pos        = cpu.it_pos;
+    cores[core_id].it_len        = cpu.it_len;
     cores[core_id].is_halted     = (cpu.r[15] == 0xFFFFFFFF);
 
     memcpy(cpu.r, ctx->r, sizeof(cpu.r));
@@ -1581,6 +1697,10 @@ void cpu_unbind_core_context(int core_id, const cpu_bind_context_t *ctx) {
     cpu.primask = ctx->primask;
     cpu.faultmask = ctx->faultmask;
     cpu.control = ctx->control;
+    cpu.it_base = ctx->it_base;
+    cpu.it_mask = ctx->it_mask;
+    cpu.it_pos = ctx->it_pos;
+    cpu.it_len = ctx->it_len;
 
     mem_set_ram_ptr(cpu.ram, RAM_BASE, RAM_SIZE);
     /* Preserve the old cpu_step_core() behavior: after a core runs, the
@@ -1604,6 +1724,8 @@ void cpu_step_core(int core_id) {
     uint32_t saved_primask = cpu.primask;
     uint32_t saved_faultmask = cpu.faultmask;
     uint32_t saved_control = cpu.control;
+    uint32_t saved_it = (uint32_t)cpu.it_base | ((uint32_t)cpu.it_mask << 4) |
+                        ((uint32_t)cpu.it_pos << 8) | ((uint32_t)cpu.it_len << 12);
 
     memcpy(cpu.r, cores[core_id].r, sizeof(cpu.r));
     cpu.xpsr = cores[core_id].xpsr;
@@ -1615,6 +1737,10 @@ void cpu_step_core(int core_id) {
     cpu.primask = cores[core_id].primask;
     cpu.faultmask = cores[core_id].faultmask;
     cpu.control = cores[core_id].control;
+    cpu.it_base = cores[core_id].it_base;
+    cpu.it_mask = cores[core_id].it_mask;
+    cpu.it_pos = cores[core_id].it_pos;
+    cpu.it_len = cores[core_id].it_len;
 
     mem_set_ram_ptr(cpu.ram, RAM_BASE, RAM_SIZE);
     set_active_core(core_id);
@@ -1629,6 +1755,10 @@ void cpu_step_core(int core_id) {
     cores[core_id].primask = cpu.primask;
     cores[core_id].faultmask = cpu.faultmask;
     cores[core_id].control = cpu.control;
+    cores[core_id].it_base = cpu.it_base;
+    cores[core_id].it_mask = cpu.it_mask;
+    cores[core_id].it_pos = cpu.it_pos;
+    cores[core_id].it_len = cpu.it_len;
 
     if (cpu.r[15] == 0xFFFFFFFF) {
         cores[core_id].is_halted = 1;
@@ -1644,11 +1774,18 @@ void cpu_step_core(int core_id) {
     cpu.primask = saved_primask;
     cpu.faultmask = saved_faultmask;
     cpu.control = saved_control;
+    cpu.it_base = saved_it & 0xF;
+    cpu.it_mask = (saved_it >> 4) & 0xF;
+    cpu.it_pos = (saved_it >> 8) & 0xF;
+    cpu.it_len = (saved_it >> 12) & 0xF;
     mem_set_ram_ptr(cpu.ram, RAM_BASE, RAM_SIZE);
 }
 
 void dual_core_step(void) {
     static int current = 0;
+    /* Fast-forwarded microseconds since the last forced WFE re-evaluation
+     * wakeup (see below). */
+    static uint32_t wfe_wake_acc_us = 0;
 
     for (int i = 0; i < num_active_cores; i++) {
         int c = current % num_active_cores;
@@ -1656,6 +1793,7 @@ void dual_core_step(void) {
 
         /* Skip cores sleeping in WFI/WFE — wake when interrupt pending */
         if (cores[c].is_wfi) {
+            uint32_t ff_us = 0;
             /* If every active core is asleep, fast-forward time to the next
              * timer deadline instead of trickling 1 cycle/iteration (a 1s
              * sleep_ms would otherwise take minutes of wall time). Capped
@@ -1676,6 +1814,7 @@ void dual_core_step(void) {
                     rp2350_periph_state_t *ps = (rp2350_periph_state_t *)membus_rp2350_periph;
                     rp2350_timer1_tick(ps, chunk_us);
                 }
+                ff_us = chunk_us;
             } else {
                 /* SysTick keeps running while the core is asleep. */
                 systick_tick_for_core(c, 1);
@@ -1689,6 +1828,19 @@ void dual_core_step(void) {
                        systick_states[c].pending ||
                        nvic_states[c].pendsv_pending;
             set_active_core(saved_core);
+            if (!wake && c == CORE0 && ff_us > 0) {
+                /* Bounded spurious wakeup: real HW wakes WFE on SEV and
+                 * other events we don't model (e.g. an alarm-pool
+                 * callback whose timer IRQ was never programmed). SDK WFE
+                 * loops always re-check their condition, so waking every
+                 * ~5ms of fast-forwarded time is harmless and prevents
+                 * eternal sleep. */
+                wfe_wake_acc_us += ff_us;
+                if (wfe_wake_acc_us >= 5000) {
+                    wfe_wake_acc_us = 0;
+                    wake = 1;
+                }
+            }
             if (!wake) continue;
             cores[c].is_wfi = 0;  /* Wake up */
         }
@@ -1758,8 +1910,13 @@ void cpu_reset_core(int core_id) {
     c->is_halted = (core_id == CORE1) ? 1 : 0;
     c->vtor = 0x10000100;
     c->primask = 0;
+    c->it_base = 0;
+    c->it_mask = 0;
+    c->it_pos = 0;
+    c->it_len = 0;
     c->exception_depth = 0;
     memset(c->exception_stack, 0, sizeof(c->exception_stack));
+    memset(c->it_stack, 0, sizeof(c->it_stack));
 
     if (core_id == CORE0) {
         if (boot2_detected) {
@@ -1836,6 +1993,10 @@ void cpu_exception_entry_dual(int core_id, uint32_t vector_num) {
     c->r[15] = handler_addr & ~1u;
     c->r[14] = 0xFFFFFFF9;
     c->in_handler_mode = 1;
+    c->it_base = 0;
+    c->it_mask = 0;
+    c->it_pos = 0;
+    c->it_len = 0;
 }
 
 void cpu_exception_return_dual(int core_id, uint32_t lr_value) {

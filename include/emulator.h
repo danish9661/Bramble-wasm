@@ -110,6 +110,13 @@ typedef struct {
     uint32_t faultmask;             /* FAULTMASK register (1=all exceptions masked except NMI) */
     uint32_t control;               /* CONTROL register (SPSEL, nPRIV) */
 
+    /* IT-block (If-Then) predication state, Thumb-2 (M33 mainly).
+     * it_len == 0 when not inside an IT block. */
+    uint8_t it_base;                /* Base condition code (4 bits) */
+    uint8_t it_mask;                /* 4-bit mask field from the IT instruction */
+    uint8_t it_pos;                 /* Index of next predicated instruction (0-based) */
+    uint8_t it_len;                 /* Total predicated followers (1-4) */
+
 } cpu_state_t;
 
 extern cpu_state_t cpu;
@@ -172,6 +179,15 @@ typedef struct {
     uint32_t faultmask;             /* FAULTMASK register (1=all exceptions masked except NMI) */
     uint32_t control;               /* CONTROL register (SPSEL, nPRIV) */
 
+    /* IT-block predication state (see cpu_state_t) */
+    uint8_t it_base;
+    uint8_t it_mask;
+    uint8_t it_pos;
+    uint8_t it_len;
+
+    /* Saved IT state across exception nesting (parallel to exception_stack) */
+    uint32_t it_stack[MAX_EXCEPTION_DEPTH];
+
     /* Exception nesting (per-core) */
     uint32_t exception_stack[MAX_EXCEPTION_DEPTH];
     int exception_depth;
@@ -214,6 +230,10 @@ extern multicore_fifo_t fifo[NUM_CORES];
 
 /* Set active RAM pointer for memory bus routing (eliminates per-step memcpy) */
 void mem_set_ram_ptr(uint8_t *ram, uint32_t base, uint32_t size);
+/* Fast halfword fetch from active RAM (1 if pc inside, else 0) */
+int mem_fetch16_ram(uint32_t pc, uint16_t *out);
+/* Top of executable RAM (follows the active RAM window) */
+uint32_t mem_ram_top(void);
 
 /* pc_updated flag: set by instruction handlers that modify PC */
 extern int pc_updated;
@@ -274,6 +294,9 @@ void cpu_step(void);
 int cpu_is_halted(void);
 void cpu_reset_from_flash(void);
 
+/* IT-block predication state (set by instr_it, checked in cpu_step) */
+void it_set_state(uint16_t instr);
+
 void cpu_exception_entry(uint32_t vector_num);
 void cpu_exception_return(uint32_t lr_value);
 
@@ -309,6 +332,10 @@ typedef struct {
     uint32_t primask;
     uint32_t faultmask;
     uint32_t control;
+    uint8_t it_base;
+    uint8_t it_mask;
+    uint8_t it_pos;
+    uint8_t it_len;
     int active_core;
 } cpu_bind_context_t;
 

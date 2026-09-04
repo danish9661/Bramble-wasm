@@ -8,6 +8,14 @@
 #define UART1_BASE      0x40038000
 #define UART_BLOCK_SIZE 0x1000
 
+/* RP2350 moved both UARTs (same PL011, same 4KB block + aliases) */
+#ifndef RP2350_UART0_BASE
+#define RP2350_UART0_BASE      0x40070000
+#endif
+#ifndef RP2350_UART1_BASE
+#define RP2350_UART1_BASE      0x40078000
+#endif
+
 /* PL011 register offsets */
 #define UART_DR         0x000   /* Data Register */
 #define UART_RSR        0x004   /* Receive Status / Error Clear */

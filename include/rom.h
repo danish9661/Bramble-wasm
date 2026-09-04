@@ -34,6 +34,13 @@
 #define ROM_FUNC_FLASH_FLUSH_CACHE      ROM_TABLE_CODE('F', 'C')
 #define ROM_FUNC_FLASH_ENTER_CMD_XIP    ROM_TABLE_CODE('C', 'X')
 
+/* RP2350-only ROM function codes (RP2350 datasheet § bootrom) */
+#define ROM_FUNC_GET_SYS_INFO           ROM_TABLE_CODE('G', 'S')
+#define ROM_FUNC_REBOOT                 ROM_TABLE_CODE('R', 'B')
+/* bootrom_state_reset(flags): resets bootrom global/per-core state
+ * (permissions, callbacks). No secure state exists in emulation → no-op. */
+#define ROM_FUNC_BOOTROM_STATE_RESET    ROM_TABLE_CODE('S', 'R')
+
 /* ROM data table codes */
 #define ROM_DATA_SOFT_FLOAT  ROM_TABLE_CODE('S', 'F')
 #define ROM_DATA_SOFT_DOUBLE ROM_TABLE_CODE('S', 'D')

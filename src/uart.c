@@ -1,5 +1,6 @@
 #include <stdio.h>
 #include <string.h>
+#include "emulator.h"
 #include "uart.h"
 #include "nvic.h"
 #include "netbridge.h"
@@ -26,6 +27,13 @@ void uart_init(void) {
 int uart_match(uint32_t addr) {
     /* Strip atomic alias bits to get base peripheral address */
     uint32_t base = addr & ~0x3000;
+    /* RP2350 bases first when in RP2350 mode (they differ from RP2040) */
+    if (membus_rp2350_mode) {
+        if (base >= RP2350_UART0_BASE && base < RP2350_UART0_BASE + UART_BLOCK_SIZE)
+            return 0;
+        if (base >= RP2350_UART1_BASE && base < RP2350_UART1_BASE + UART_BLOCK_SIZE)
+            return 1;
+    }
     if (base >= UART0_BASE && base < UART0_BASE + UART_BLOCK_SIZE)
         return 0;
     if (base >= UART1_BASE && base < UART1_BASE + UART_BLOCK_SIZE)
@@ -178,6 +186,7 @@ void uart_write32(int uart_num, uint32_t offset, uint32_t val) {
     switch (offset) {
     case UART_DR:
         u->dr = val;
+        { static int n = 0; if (n < 12) { n++; fprintf(stderr, "[TEMP-UARTTX] uart%d DR=%02X cr=%08X TXE=%d\n", uart_num, val & 0xFF, u->cr, !!(u->cr & UART_CR_TXE)); } }
         if (u->cr & UART_CR_TXE) {
             uint8_t ch = (uint8_t)(val & 0xFF);
             u->tx_activity++;

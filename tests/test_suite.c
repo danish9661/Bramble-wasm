@@ -1010,6 +1010,27 @@ TEST(test_resets_atomic_clear) {
     PASS();
 }
 
+TEST(test_rp2350_clocks_base_collision) {
+    /* 0x40010000 is PSM on RP2040 but CLOCKS on RP2350; 0x40058000 is
+     * WATCHDOG on RP2040 but PLL_USB on RP2350. In RP2350 mode the RP2350
+     * meaning must win: littleos_pico2 hung in a CLK_SYS_SELECTED wait
+     * because the read hit PSM and returned 0. */
+    int saved_mode = membus_rp2350_mode;
+    membus_rp2350_mode = 1;
+    clocks_init();
+    ASSERT_EQ(1, clocks_read32(RP2350_CLOCKS_BASE + 0x44) & 0x1,
+              "RP2350 CLK_SYS_SELECTED bit0 set (ROSC selected)");
+    clocks_write32(RP2350_CLOCKS_BASE + 0x3000 + 0x3C, 0x1);
+    ASSERT_EQ(1, clocks_read32(RP2350_CLOCKS_BASE + 0x44) & 0x1,
+              "SELECTED still 1 after CLR of SYS ENABLE (reached CLOCKS, not PSM)");
+    clocks_write32(RP2350_PLL_USB_BASE + PLL_FBDIV_INT_OFFSET, 125);
+    ASSERT_EQ(125, clocks_read32(RP2350_PLL_USB_BASE + PLL_FBDIV_INT_OFFSET),
+              "RP2350 PLL_USB FBDIV roundtrips (not RP2040 WATCHDOG)");
+    membus_rp2350_mode = saved_mode;
+    clocks_init();
+    PASS();
+}
+
 /* ========================================================================
  * Clocks Peripheral Tests
  * ======================================================================== */
@@ -1024,6 +1045,20 @@ TEST(test_clocks_ctrl_write_read) {
     clocks_init();
     clocks_write32(CLOCKS_BASE + 0x00, 0x00000880);
     ASSERT_EQ(0x00000880, clocks_read32(CLOCKS_BASE + 0x00), "CLK CTRL r/w");
+    PASS();
+}
+
+TEST(test_clocks_selected_auxsrc) {
+    /* Aux-selected clocks report the configured AUXSRC bit in SELECTED
+     * (SDK clock_configure spins until its source bit appears).
+     * CTRL=0 still yields 0x1. */
+    clocks_init();
+    /* GPOUT0 (gen 0) SELECTED at CLOCKS+0x08, default = 1. */
+    ASSERT_EQ(1, clocks_read32(CLOCKS_BASE + 0x08), "SELECTED defaults to 1");
+    /* Configure AUXSRC=5 (bits[8:5]=101): ENABLE bit11 + auxsrc. */
+    clocks_write32(CLOCKS_BASE + 0x00, (1u << 11) | (5u << 5));
+    ASSERT_EQ(1u << 5, clocks_read32(CLOCKS_BASE + 0x08),
+              "SELECTED follows AUXSRC bit");
     PASS();
 }
 
@@ -2616,6 +2651,37 @@ TEST(test_rom_lookup_not_found) {
     PASS();
 }
 
+TEST(test_rom_rp2350_sr_lookup) {
+    /* RP2350 SDK runtime_init() calls rom_bootrom_state_reset() ('SR')
+     * twice with no NULL check; a miss makes firmware BX to 0 and walk
+     * the ROM header as code (littleos_pico2 90M-step lockup). */
+    reset_cpu();
+    rom_patch_rp2350_arm();
+    ASSERT_EQ(0x0701, mem_read16(0x16), "RP2350 lookup fn pointer patched");
+    cpu.r[0] = ROM_FUNC_BOOTROM_STATE_RESET; /* 'SR' */
+    cpu.r[1] = 16;                           /* secure table selector */
+    cpu.r[14] = FLASH_BASE + 0x100;
+    cpu.r[15] = 0x0700;                      /* patched 32-bit lookup stub */
+    for (int i = 0; i < 200 && !cpu_is_halted(); i++) {
+        cpu_step();
+        if (cpu.r[15] >= FLASH_BASE) break;
+    }
+    ASSERT_EQ(0x07CD, cpu.r[0], "SR lookup returns bootrom_state_reset stub");
+    ASSERT_EQ(FLASH_BASE + 0x100, cpu.r[15], "Lookup returns to caller");
+    /* GS must still resolve (table walk did not regress) */
+    reset_cpu();
+    rom_patch_rp2350_arm();
+    cpu.r[0] = ROM_FUNC_GET_SYS_INFO;
+    cpu.r[14] = FLASH_BASE + 0x100;
+    cpu.r[15] = 0x0700;
+    for (int i = 0; i < 200 && !cpu_is_halted(); i++) {
+        cpu_step();
+        if (cpu.r[15] >= FLASH_BASE) break;
+    }
+    ASSERT_EQ(0x07C9, cpu.r[0], "GS lookup still returns get_sys_info stub");
+    PASS();
+}
+
 TEST(test_rom_popcount) {
     reset_cpu();
     cpu.r[0] = 0xFF00FF00;             /* 16 bits set */
@@ -3867,6 +3933,65 @@ TEST(test_wfi_sets_core_flag) {
     PASS();
 }
 
+TEST(test_it_hint_decode) {
+    /* 0xBF hints vs IT: low nibble 0 => hint, else IT. `it cc` (0xBF38)
+     * used to decode as WFI and freeze the core (littleos_pico2 hung
+     * in SDK PLL setup at 0x10001F3C). */
+    reset_cpu();
+    uint32_t pc = RAM_BASE + 0x1000;
+    mem_write16(pc, 0xBF38);     /* it cc */
+    mem_write16(pc + 2, 0xBF00); /* nop */
+    cores[CORE0].is_wfi = 0;
+    cpu.r[15] = pc;
+    cpu_step();
+    ASSERT_TRUE(!cores[CORE0].is_wfi, "IT must not sleep the core");
+    ASSERT_EQ(pc + 2, cpu.r[15], "IT advances PC by 2");
+    /* Genuine WFI still sleeps. */
+    mem_write16(pc, 0xBF30);     /* wfi */
+    cpu.r[15] = pc;
+    cpu_step();
+    ASSERT_TRUE(cores[CORE0].is_wfi, "WFI must sleep the core");
+    cores[CORE0].is_wfi = 0;
+    PASS();
+}
+
+TEST(test_it_block_predication) {
+    /* itte cc (0xBF3A) + movcc/movcc/movcs: predicated instructions run
+     * only when their condition holds (SDK delayed_by_ms relies on this;
+     * without it sleep_ms(100) became sleep-forever on littleos_pico2). */
+    reset_cpu();
+    uint32_t pc = RAM_BASE + 0x1000;
+    mem_write16(pc + 0, 0xBF3A); /* itte cc */
+    mem_write16(pc + 2, 0x4604); /* mov r4, r0 */
+    mem_write16(pc + 4, 0x4615); /* mov r5, r2 */
+    mem_write16(pc + 6, 0x460D); /* mov r5, r1 */
+    mem_write16(pc + 8, 0xBF00); /* nop */
+    /* CC true (C=0, carry clear): first two run, third skipped. */
+    cpu.r[0] = 0xAAAAAAAA; cpu.r[1] = 0xBBBBBBBB; cpu.r[2] = 0xCCCCCCCC;
+    cpu.r[4] = 0; cpu.r[5] = 0;
+    cpu.xpsr &= ~0x20000000u;
+    cpu.r[15] = pc;
+    for (int i = 0; i < 4 && !cpu_is_halted(); i++) cpu_step();
+    ASSERT_EQ(0xAAAAAAAA, cpu.r[4], "movcc executes when CC true");
+    ASSERT_EQ(0xCCCCCCCC, cpu.r[5], "second movcc executes when CC true");
+    ASSERT_EQ(pc + 8, cpu.r[15], "PC advances past IT block");
+    /* CC false (C=1): first two skipped, third runs. */
+    reset_cpu();
+    mem_write16(pc + 0, 0xBF3A);
+    mem_write16(pc + 2, 0x4604);
+    mem_write16(pc + 4, 0x4615);
+    mem_write16(pc + 6, 0x460D);
+    mem_write16(pc + 8, 0xBF00);
+    cpu.r[0] = 0xAAAAAAAA; cpu.r[1] = 0xBBBBBBBB; cpu.r[2] = 0xCCCCCCCC;
+    cpu.r[4] = 0; cpu.r[5] = 0;
+    cpu.xpsr |= 0x20000000u;
+    cpu.r[15] = pc;
+    for (int i = 0; i < 4 && !cpu_is_halted(); i++) cpu_step();
+    ASSERT_EQ(0, cpu.r[4], "movcc skipped when CC false");
+    ASSERT_EQ(0xBBBBBBBB, cpu.r[5], "movcs executes when CC false");
+    PASS();
+}
+
 /* ========================================================================
  * Wire Protocol Tests
  * ======================================================================== */
@@ -4526,6 +4651,250 @@ TEST(test_m33_thumb2_movw_movt) {
     PASS();
 }
 
+TEST(test_m33_thumb2_bics_w) {
+    /* BICS.W (EA32 0303 = bics.w r3, r2, r3): 0xEA/0xEB group is
+     * data-processing with shifted register, NOT LDRD/STRD. The old
+     * misdecode never set flags and corrupted Rn, spinning forever
+     * in SDK reset-done waits (littleos_pico2 1B-step hang). */
+    reset_cpu();
+    cpu.r[2] = 0x03F3FFF6;
+    cpu.r[3] = 0x13F3FFF6;
+    thumb32_step(0x10000100, 0xEA32, 0x0303);
+    ASSERT_EQ(0, cpu.r[3], "r2 & ~r3 = 0 when all waited bits set");
+    ASSERT_EQ(0x03F3FFF6, cpu.r[2], "Rn must not be modified (no LDRD writeback)");
+    ASSERT_TRUE((cpu.xpsr & 0x40000000u) != 0, "Z flag set on zero result");
+    ASSERT_EQ(0x10000104, cpu.r[15], "BICS.W advances PC by 4");
+    /* Nonzero case clears Z */
+    reset_cpu();
+    cpu.r[2] = 0x03F3FFF6;
+    cpu.r[3] = 0x00000000;
+    thumb32_step(0x10000100, 0xEA32, 0x0303);
+    ASSERT_EQ(0x03F3FFF6, cpu.r[3], "r2 & ~0 = r2");
+    ASSERT_TRUE((cpu.xpsr & 0x40000000u) == 0, "Z flag clear on nonzero result");
+    PASS();
+}
+
+TEST(test_m33_thumb2_clz_nonzero_rd) {
+    /* CLZ T1 with nonzero Rd: FAB2 F382 = clz r3, r2. The t32_misc
+     * pattern masked Rd (0xF0FF) so only Rd==R0 matched; others fell
+     * into a bogus load/store decode (littleos_pico2 division hung
+     * with a smashed stack after clz r3, r2). */
+    reset_cpu();
+    cpu.r[2] = 0x00010000;
+    thumb32_step(0x10000100, 0xFAB2, 0xF382);
+    ASSERT_EQ(15, cpu.r[3], "clz(0x00010000) = 15");
+    ASSERT_EQ(0x10000104, cpu.r[15], "CLZ advances PC by 4");
+    /* RBIT with nonzero Rm: FA92 F0A2 = rbit r0, r2. */
+    reset_cpu();
+    cpu.r[2] = 0x00000001;
+    thumb32_step(0x10000100, 0xFA92, 0xF0A2);
+    ASSERT_EQ(0x80000000u, cpu.r[0], "rbit(1) = 0x80000000");
+    PASS();
+}
+
+TEST(test_m33_thumb2_lsl_reg) {
+    /* LSL.W (register) T2: FA02 F101 = lsl.w r1, r2, r1. Was misdecoded
+     * as a load/store single (Rd unchanged), hanging SDK clock waits
+     * that build their SELECTED mask with lsl.w (littleos_pico2). */
+    reset_cpu();
+    cpu.r[1] = 2;
+    cpu.r[2] = 1;
+    thumb32_step(0x10000100, 0xFA02, 0xF101);
+    ASSERT_EQ(4, cpu.r[1], "1 << 2 = 4 (LSL.W reg)");
+    ASSERT_EQ(0x10000104, cpu.r[15], "LSL.W advances PC by 4");
+    /* LSR.W (register): FA22 F101 = lsr.w r1, r2, r1. */
+    reset_cpu();
+    cpu.r[1] = 2;
+    cpu.r[2] = 0x10;
+    thumb32_step(0x10000100, 0xFA22, 0xF101);
+    ASSERT_EQ(4, cpu.r[1], "0x10 >> 2 = 4 (LSR.W reg)");
+    PASS();
+}
+
+TEST(test_m33_thumb2_ldrw_pc_masks_thumb_bit) {
+    /* LDR.W to PC interworks: bit0 selects Thumb state and must be
+     * cleared (unmasked odd PC misaligned the next fetch and sent
+     * littleos_pico2 wild, e.g. to 0x00025052). F8D0 F004 =
+     * ldr.w pc, [r0, #4]. */
+    reset_cpu();
+    uint32_t cell = RAM_BASE + 0x3000;
+    mem_write32(cell + 4, 0x10007823);   /* odd Thumb return address */
+    cpu.r[0] = cell;
+    thumb32_step(0x10000100, 0xF8D0, 0xF004);
+    ASSERT_EQ(0x10007822, cpu.r[15], "LDR.W to PC clears Thumb bit");
+    PASS();
+}
+
+TEST(test_m33_fetch_uses_active_ram) {
+    /* Instruction fetch must use the active RAM window (520KB SRAM in
+     * M33 mode), not the cpu.ram backing store: with cpu.ram's stale
+     * zeros, littleos_pico2 executed NOPs through all its RAM code.
+     * BX LR (0x4770) placed above the RP2040 264KB boundary. */
+    reset_cpu();
+    static uint8_t big_ram[520 * 1024];
+    memset(big_ram, 0, sizeof(big_ram));
+    int saved_mode = membus_rp2350_mode;
+    membus_rp2350_mode = 1;
+    mem_set_ram_ptr(big_ram, 0x20000000, 520 * 1024);
+    big_ram[0x42000] = 0x70;
+    big_ram[0x42001] = 0x47;
+    cpu.r[14] = FLASH_BASE + 0x100;
+    cpu.r[15] = 0x20042000;
+    cpu_step();
+    ASSERT_EQ(FLASH_BASE + 0x100, cpu.r[15], "BX LR fetched from upper RAM");
+    membus_rp2350_mode = saved_mode;
+    mem_set_ram_ptr(cpu.ram, RAM_BASE, RAM_SIZE);
+    PASS();
+}
+
+TEST(test_m33_thumb2_ldrw_pcrel_veneer) {
+    /* F85F F000 = ldr.w pc, [pc]: jump-table veneer with Rn==15 and a
+     * zero offset field. Must read the literal at Align(PC,4), NOT
+     * PC+R0 (which sent littleos_pico2 to 0x5F200040). */
+    reset_cpu();
+    uint32_t p = RAM_BASE + 0x1000;
+    mem_write32(p + 4, 0x20001001);   /* odd Thumb target in literal slot */
+    cpu.r[0] = 5;                     /* nonzero: must be ignored */
+    thumb32_step(p, 0xF85F, 0xF000);
+    ASSERT_EQ(0x20001000, cpu.r[15], "PC-relative veneer loads literal");
+    /* Genuine register offset still works: F853 2000 = ldr.w r2,[r3,r0]. */
+    reset_cpu();
+    uint32_t cell = RAM_BASE + 0x2000;
+    mem_write32(cell + 4, 0xDEADBEEF);
+    cpu.r[3] = cell;
+    cpu.r[0] = 4;
+    thumb32_step(0x10000100, 0xF853, 0x2000);
+    ASSERT_EQ(0xDEADBEEF, cpu.r[2], "Register offset uses Rm");
+    PASS();
+}
+
+TEST(test_m33_thumb2_vfp_nop) {
+    /* M33 FPU: EE10 0430 = cfmvrdh lives in the 0x1D group (not 0x1E).
+     * With no FPU it must be a NOP; misdecoded as shifted-register DP
+     * it wrote Rd (here r4) and corrupted littleos_pico2 runtime_init. */
+    reset_cpu();
+    cpu.r[0] = 0x12345678;
+    cpu.r[4] = 0xDEADBEEF;
+    cpu.xpsr &= ~(0x80000000u | 0x40000000u | 0x20000000u | 0x10000000u);
+    thumb32_step(0x10000100, 0xEE10, 0x0430);
+    ASSERT_EQ(0xDEADBEEF, cpu.r[4], "VFP stub must not write Rd");
+    ASSERT_EQ(0x12345678, cpu.r[0], "VFP stub must not touch Rn");
+    ASSERT_EQ(0x10000104, cpu.r[15], "VFP stub advances PC by 4");
+    PASS();
+}
+
+TEST(test_cbnz_taken_and_nottaken) {
+    /* B94A = cbnz r2, +18 (target pc+4+18). Taken when r2 != 0. */
+    reset_cpu();
+    uint32_t pc = RAM_BASE + 0x1000;
+    mem_write16(pc, 0xB94A);
+    cpu.r[2] = 1000;
+    cpu.r[15] = pc;
+    cpu_step();
+    ASSERT_EQ(pc + 4 + 18, cpu.r[15], "CBNZ taken for nonzero");
+    reset_cpu();
+    mem_write16(pc, 0xB94A);
+    cpu.r[2] = 0;
+    cpu.r[15] = pc;
+    cpu_step();
+    ASSERT_EQ(pc + 2, cpu.r[15], "CBNZ falls through for zero");
+    PASS();
+}
+
+TEST(test_m33_thumb2_stlb_ldab) {
+    /* M33 release/acquire byte access: E8C3 1F8F = stlb r1, [r3],
+     * E8D4 6F8F = ldab r6, [r4]. Misdecoded as STRD/LDRD, STLB wrote
+     * PC+4 as a second word and corrupted littleos_pico2 RAM. */
+    reset_cpu();
+    uint32_t cell = RAM_BASE + 0x2000;
+    mem_write8(cell, 0xAA);
+    cpu.r[3] = cell;
+    cpu.r[1] = 0x5A;
+    thumb32_step(0x10000100, 0xE8C3, 0x1F8F);
+    ASSERT_EQ(0x5A, mem_read8(cell), "STLB stores the byte");
+    ASSERT_EQ(0x10000104, cpu.r[15], "STLB advances PC by 4 (no PC spray)");
+    ASSERT_EQ(0, mem_read32(cell + 4), "STLB must not touch adjacent words");
+    cpu.r[4] = cell;
+    thumb32_step(0x10000100, 0xE8D4, 0x6F8F);
+    ASSERT_EQ(0x5A, cpu.r[6], "LDAB loads the byte");
+    ASSERT_EQ(0x10000104, cpu.r[15], "LDAB advances PC by 4");
+    PASS();
+}
+
+TEST(test_m33_thumb2_tbb_tbh) {
+    /* Table branches (unreachable before: bit6 routing sent them to
+     * LDRD/STRD, so littleos_pico2's switch jumped to 0x002C0149).
+     * E8DF F001 = tbb [pc, r1]; table byte 3 -> pc+4+6. */
+    reset_cpu();
+    uint32_t tbl = RAM_BASE + 0x2000;
+    mem_write8(tbl + 3, 3);
+    cpu.r[1] = 3;
+    /* TBB uses Rn==PC: base is pc+4, so place the call accordingly. */
+    uint32_t pc = tbl - 4;
+    cpu.r[15] = pc;
+    thumb32_step(pc, 0xE8DF, 0xF001);
+    ASSERT_EQ(pc + 4 + 3 * 2, cpu.r[15], "TBB adds table byte * 2");
+    /* TBH: E8DF F011, halfword entry 5 -> pc+4+10. */
+    reset_cpu();
+    mem_write16(tbl + 8, 5);
+    cpu.r[1] = 4;
+    pc = tbl - 4;
+    thumb32_step(pc, 0xE8DF, 0xF011);
+    ASSERT_EQ(pc + 4 + 5 * 2, cpu.r[15], "TBH adds table halfword * 2");
+    PASS();
+}
+
+TEST(test_m33_thumb2_ldrex_strex) {
+    /* Word exclusives: E853 2000 = ldrex r2, [r3]; E846 5400 =
+     * strex r4, r5, [r6]. Single-core: plain access + success. */
+    reset_cpu();
+    uint32_t cell = RAM_BASE + 0x2000;
+    mem_write32(cell, 0x12345678);
+    cpu.r[3] = cell;
+    thumb32_step(0x10000100, 0xE853, 0x2000);
+    ASSERT_EQ(0x12345678, cpu.r[2], "LDREX loads word");
+    cpu.r[6] = cell;
+    cpu.r[5] = 0xAABBCCDD;
+    cpu.r[4] = 0xFFFFFFFF;
+    thumb32_step(0x10000100, 0xE846, 0x5400);
+    ASSERT_EQ(0xAABBCCDD, mem_read32(cell), "STREX stores word");
+    ASSERT_EQ(0, cpu.r[4], "STREX reports success");
+    PASS();
+}
+
+TEST(test_m33_thumb2_ldaex_strexb) {
+    /* M33 exclusives: E8D4 6FCF = ldaexb r6, [r4]; E8C4 0F46 =
+     * strexb r6, r0, [r4]. Misdecoded as LDRD/STRD they clobbered PC
+     * (Rd=15 phantom) and walked ROM into littleos_pico2 .bss. */
+    reset_cpu();
+    uint32_t cell = RAM_BASE + 0x2000;
+    mem_write8(cell, 0x00);
+    cpu.r[4] = cell;
+    thumb32_step(0x10000100, 0xE8D4, 0x6FCF);
+    ASSERT_EQ(0, cpu.r[6], "LDAEXB loads byte");
+    ASSERT_EQ(0x10000104, cpu.r[15], "LDAEXB advances PC by 4");
+    cpu.r[0] = 1;
+    thumb32_step(0x10000100, 0xE8C4, 0x0F46);
+    ASSERT_EQ(0, cpu.r[6], "STREXB reports success (0)");
+    ASSERT_EQ(1, mem_read8(cell), "STREXB stores byte");
+    ASSERT_EQ(0x10000104, cpu.r[15], "STREXB advances PC by 4");
+    PASS();
+}
+
+TEST(test_m33_thumb2_tt_secure) {
+    /* TT (Test Target, TrustZone): E842 F200 = tt r2, r2, emitted by the
+     * RP2350 SDK ROM trampoline. All memory is Secure here → response 0.
+     * Must not be misdecoded as shifted-register DP or STRD (no mem writes). */
+    reset_cpu();
+    cpu.r[2] = 0x12345678;
+    uint32_t rom0_before = mem_read32(0x00000000);
+    thumb32_step(0x10000100, 0xE842, 0xF200);
+    ASSERT_EQ(0, cpu.r[2], "TT response is 0 (secure, no MPU)");
+    ASSERT_EQ(0x10000104, cpu.r[15], "TT advances PC by 4");
+    ASSERT_EQ(rom0_before, mem_read32(0x00000000), "TT must not write memory");
+    PASS();
+}
+
 /* ========================================================================
  * RISC-V Hazard3 Tests
  * ======================================================================== */
@@ -4982,11 +5351,13 @@ int main(void) {
     RUN_TEST(test_resets_power_on_state);
     RUN_TEST(test_resets_release_and_done);
     RUN_TEST(test_resets_atomic_clear);
+    RUN_TEST(test_rp2350_clocks_base_collision);
     END_CATEGORY("Resets Peripheral");
 
     BEGIN_CATEGORY("Clocks Peripheral");
     RUN_TEST(test_clocks_selected_always_set);
     RUN_TEST(test_clocks_ctrl_write_read);
+    RUN_TEST(test_clocks_selected_auxsrc);
     END_CATEGORY("Clocks Peripheral");
 
     BEGIN_CATEGORY("XOSC");
@@ -5074,6 +5445,7 @@ int main(void) {
     RUN_TEST(test_bcond_negative_offset);
     RUN_TEST(test_b_unconditional);
     RUN_TEST(test_bcond_not_taken);
+    RUN_TEST(test_cbnz_taken_and_nottaken);
     END_CATEGORY("Branch Instructions");
 
     BEGIN_CATEGORY("STMIA/LDMIA");
@@ -5123,6 +5495,7 @@ int main(void) {
     RUN_TEST(test_rom_func_table_entries);
     RUN_TEST(test_rom_lookup_fn);
     RUN_TEST(test_rom_lookup_not_found);
+    RUN_TEST(test_rom_rp2350_sr_lookup);
     RUN_TEST(test_rom_popcount);
     RUN_TEST(test_rom_clz);
     RUN_TEST(test_rom_ctz);
@@ -5318,6 +5691,8 @@ int main(void) {
     RUN_TEST(test_corepool_query_cores_prunes_stale_entries);
     RUN_TEST(test_num_active_cores_default);
     RUN_TEST(test_wfi_sets_core_flag);
+    RUN_TEST(test_it_hint_decode);
+    RUN_TEST(test_it_block_predication);
     END_CATEGORY("Core Pool / Threading");
 
     BEGIN_CATEGORY("Wire Protocol");
@@ -5362,6 +5737,18 @@ int main(void) {
     RUN_TEST(test_m33_basepri);
     RUN_TEST(test_m33_thumb2_sdiv);
     RUN_TEST(test_m33_thumb2_movw_movt);
+    RUN_TEST(test_m33_thumb2_bics_w);
+    RUN_TEST(test_m33_thumb2_lsl_reg);
+    RUN_TEST(test_m33_thumb2_clz_nonzero_rd);
+    RUN_TEST(test_m33_thumb2_ldaex_strexb);
+    RUN_TEST(test_m33_thumb2_ldrw_pc_masks_thumb_bit);
+    RUN_TEST(test_m33_thumb2_stlb_ldab);
+    RUN_TEST(test_m33_thumb2_tbb_tbh);
+    RUN_TEST(test_m33_thumb2_ldrex_strex);
+    RUN_TEST(test_m33_thumb2_vfp_nop);
+    RUN_TEST(test_m33_thumb2_ldrw_pcrel_veneer);
+    RUN_TEST(test_m33_fetch_uses_active_ram);
+    RUN_TEST(test_m33_thumb2_tt_secure);
     END_CATEGORY("Cortex-M33");
 
     BEGIN_CATEGORY("RISC-V CPU");

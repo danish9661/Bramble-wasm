@@ -552,6 +552,28 @@ static inline uint8_t *get_ram(void) {
     return active_ram;
 }
 
+/* Fast halfword fetch from active RAM for instruction fetching.
+ * Returns 1 and stores the halfword if pc is inside the active RAM
+ * window (520KB SRAM in RP2350/M33 mode, cpu.ram otherwise), else 0.
+ * cpu_fetch16_fast must use this — reading cpu.ram directly executes
+ * stale zeros once RAM code runs in M33 mode. */
+int mem_fetch16_ram(uint32_t pc, uint16_t *out) {
+    if (pc >= active_ram_base && pc + 1 < active_ram_base + active_ram_size) {
+        uint8_t *ram = active_ram ? active_ram : cpu.ram;
+        memcpy(out, &ram[pc - active_ram_base], 2);
+        return 1;
+    }
+    return 0;
+}
+
+/* Top of executable RAM: follows the active RAM window so code in
+ * RP2350 upper SRAM (above the RP2040 264KB boundary) is recognized
+ * as executable. Defaults are correct even before the first
+ * mem_set_ram_ptr call. */
+uint32_t mem_ram_top(void) {
+    return active_ram_base + active_ram_size;
+}
+
 /* ========================================================================
  * Clock-Domain Peripheral Address Check
  *

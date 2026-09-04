@@ -643,6 +643,7 @@ void rom_patch_rp2350_arm(void) {
     RP2350_ADD_FUNC(t, ROM_FUNC_FLASH_ENTER_CMD_XIP,    0x03C5); t += 8;
     RP2350_ADD_FUNC(t, 0x5347 /* GS */, 0x07C9); t += 8;
     RP2350_ADD_FUNC(t, 0x5242 /* RB */, 0x07CB); t += 8;
+    RP2350_ADD_FUNC(t, ROM_FUNC_BOOTROM_STATE_RESET /* SR */, 0x07CD); t += 8;
     /* End marker */
     rom_write16(t,     0x0000); rom_write16(t+2, 0x0000);
     rom_write16(t+4,   0x0000); rom_write16(t+6, 0x0000);
@@ -651,6 +652,7 @@ void rom_patch_rp2350_arm(void) {
     /* Place stub functions outside table range (C8: was 0x0750/0x0752 inside table) */
     rom_write16(0x07C8, 0x4770);  /* bx lr - get_sys_info */
     rom_write16(0x07CA, 0x4770);  /* bx lr - reboot */
+    rom_write16(0x07CC, 0x4770);  /* bx lr - bootrom_state_reset (no-op: no secure state) */
 }
 
 /* Read from ROM */

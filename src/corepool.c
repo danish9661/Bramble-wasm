@@ -323,7 +323,8 @@ static void *core_thread_fn(void *arg) {
                     ts.tv_sec++;
                     ts.tv_nsec -= 1000000000;
                 }
-                pthread_cond_timedwait(&corepool.wfi_cond, &corepool.emu_lock, &ts);
+                int wrc = pthread_cond_timedwait(&corepool.wfi_cond, &corepool.emu_lock, &ts);
+                (void)wrc;
 
                 clock_gettime(CLOCK_MONOTONIC, &end);
                 uint32_t elapsed_us = corepool_elapsed_us_from_wait(&start, &end);

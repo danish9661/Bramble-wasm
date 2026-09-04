@@ -29,7 +29,7 @@ extern int pc_updated;
 #define FLAG_V 0x10000000u
 
 /* Evaluate ARM condition code against current XPSR flags */
-static int t32_check_cond(uint8_t cond) {
+int t32_check_cond(uint8_t cond) {
     int N = (cpu.xpsr & FLAG_N) != 0;
     int Z = (cpu.xpsr & FLAG_Z) != 0;
     int C = (cpu.xpsr & FLAG_C) != 0;
@@ -560,15 +560,19 @@ static int t32_misc(uint32_t pc, uint16_t upper, uint16_t lower) {
         cpu.r[RdHi] = (uint32_t)((uint64_t)result >> 32);
         return 1;
     }
-    /* CLZ T1: upper = 1111 1010 1011 Rm, lower = 1111 Rd 1000 Rm */
-    if ((upper & 0xFFF0) == 0xFAB0 && (lower & 0xF0FF) == 0xF080) {
+    /* CLZ T1: upper = 1111 1010 1011 Rm, lower = 1111 Rd 1000 Rm.
+     * The mask must exclude the variable Rd field (0xF0F0, not 0xF0FF),
+     * or any nonzero Rd (e.g. clz r3, r2 in littleos_pico2 division)
+     * falls through to a bogus load/store decode. */
+    if ((upper & 0xFFF0) == 0xFAB0 && (lower & 0xF0F0) == 0xF080) {
         int Rd = (lower >> 8) & 0xF;
         int Rm = lower & 0xF;
         cpu.r[Rd] = cpu.r[Rm] ? __builtin_clz(cpu.r[Rm]) : 32;
         return 1;
     }
-    /* RBIT T1: upper = 1111 1010 1001 Rm, lower = 1111 Rd 1010 Rm */
-    if ((upper & 0xFFF0) == 0xFA90 && (lower & 0xF0FF) == 0xF0A0) {
+    /* RBIT T1: upper = 1111 1010 1001 Rm, lower = 1111 Rd 1010 Rm
+     * (mask excludes variable Rd, see CLZ above). */
+    if ((upper & 0xFFF0) == 0xFA90 && (lower & 0xF0F0) == 0xF0A0) {
         int Rd = (lower >> 8) & 0xF;
         int Rm = lower & 0xF;
         uint32_t v = cpu.r[Rm], r = 0;
@@ -652,12 +656,36 @@ static int t32_misc(uint32_t pc, uint16_t upper, uint16_t lower) {
         cpu.r[Rd] = val & 0xFFFF;
         return 1;
     }
-    /* REV T2: upper = 1111 1010 1001 Rm, lower = 1111 Rd 1000 Rm */
-    if ((upper & 0xFFF0) == 0xFA90 && (lower & 0xF0FF) == 0xF080) {
+    /* REV T2: upper = 1111 1010 1001 Rm, lower = 1111 Rd 1000 Rm
+     * (mask excludes variable Rd, see CLZ above). */
+    if ((upper & 0xFFF0) == 0xFA90 && (lower & 0xF0F0) == 0xF080) {
         int Rd = (lower >> 8) & 0xF;
         int Rm = lower & 0xF;
         uint32_t v = cpu.r[Rm];
         cpu.r[Rd] = ((v&0xFF)<<24)|((v&0xFF00)<<8)|((v&0xFF0000)>>8)|((v>>24)&0xFF);
+        return 1;
+    }
+    /* LSL/LSR/ASR/ROR (register) T2: upper = 1111 1010 op(2) S Rn,
+     * lower = 1111 Rd 0000 Rm (e.g. FA02 F101 = lsl.w r1, r2, r1).
+     * SDK clock code uses lsl.w to build its SELECTED wait mask; falling
+     * through to ldst_single left Rd unchanged and hung the wait forever.
+     * Placed after the exact SXT/UXT checks above (0xFA0F/0xFA1F...). */
+    if ((upper & 0xFF80) == 0xFA00 && (lower & 0xF0F0) == 0xF000) {
+        int op = (upper >> 5) & 0x3;  /* 0=LSL 1=LSR 2=ASR 3=ROR */
+        int S  = (upper >> 4) & 0x1;
+        int Rn = upper & 0xF;
+        int Rd = (lower >> 8) & 0xF;
+        int Rm = lower & 0xF;
+        if (Rd != 15) {
+            int n = cpu.r[Rm] & 0xFF;
+            int carry = 0;
+            uint32_t res = t32_shift_c(cpu.r[Rn], op, n, &carry);
+            cpu.r[Rd] = res;
+            if (S) {
+                update_nz_flags(res);
+                if (carry) cpu.xpsr |= FLAG_C; else cpu.xpsr &= ~FLAG_C;
+            }
+        }
         return 1;
     }
     /* BLX register is 16-bit (handled elsewhere) */
@@ -720,7 +748,11 @@ static void t32_ldst_single(uint32_t pc, uint16_t upper, uint16_t lower) {
         case 0xC: /* STR.W */
             mem_write32(base + imm12, cpu.r[Rt]); break;
         case 0xD: /* LDR.W */
-            cpu.r[Rt] = mem_read32(base + imm12);
+            /* Loads to PC interwork (bit0 selects Thumb state); the M
+             * profile stays in Thumb, so clear it (an unmasked odd PC
+             * misaligns the next fetch and sends execution wild). */
+            cpu.r[Rt] = (Rt == 15) ? (mem_read32(base + imm12) & ~1u)
+                                   : mem_read32(base + imm12);
             if (Rt == 15) pc_updated = 1;
             break;
         default:
@@ -729,14 +761,20 @@ static void t32_ldst_single(uint32_t pc, uint16_t upper, uint16_t lower) {
         return;
     }
 
-    /* T4/T2: 8-bit signed offset with P/U/W, or register offset */
-    if (lower & 0x0800) {
+    /* T4/T2: 8-bit signed offset with P/U/W, or register offset.
+     * T4 is selected by lower bit11; additionally, Rn==15 with a zero
+     * offset field (e.g. F85F F000 = ldr.w pc, [pc], a jump-table
+     * veneer) is a PC-relative literal: route it to T4 so the base is
+     * Align(PC,4), not PC+Rn-contents (which sent littleos_pico2 to
+     * 0x5F200040). Genuine [PC,Rm] forms have nonzero offset bits and
+     * stay on the T2 path. */
+    if ((lower & 0x0800) || (Rn == 15 && (lower & 0x0FFF) == 0)) {
         /* T4: lower = Rt(4) : 1 : P : U : W : imm8 */
         int P    = (lower >> 10) & 1;
         int U    = (lower >> 9) & 1;
         int W    = (lower >> 8) & 1;
         int imm8 = lower & 0xFF;
-        uint32_t base = cpu.r[Rn];
+        uint32_t base = (Rn == 15) ? ((pc + 4) & ~3u) : cpu.r[Rn];
         int32_t  off  = U ? (int32_t)imm8 : -(int32_t)imm8;
         uint32_t offset_addr = (uint32_t)((int32_t)base + off);
         uint32_t addr = P ? offset_addr : base;
@@ -757,7 +795,9 @@ static void t32_ldst_single(uint32_t pc, uint16_t upper, uint16_t lower) {
         case 0xC: case 0x4:
             if (L) cpu.r[Rt] = mem_read32(addr); else mem_write32(addr, cpu.r[Rt]); break;
         case 0xD: case 0x5:
-            if (L) { cpu.r[Rt] = mem_read32(addr); if (Rt==15) pc_updated=1; }
+            if (L) { cpu.r[Rt] = (Rt == 15) ? (mem_read32(addr) & ~1u)
+                                            : mem_read32(addr);
+                     if (Rt==15) pc_updated=1; }
             else   { mem_write32(addr, cpu.r[Rt]); }
             break;
         default: goto unhandled_ldst;
@@ -766,12 +806,13 @@ static void t32_ldst_single(uint32_t pc, uint16_t upper, uint16_t lower) {
         return;
     }
 
-    /* T2: register offset. lower = Rt(4) : 000000 : imm2(2) : Rm(4) */
+    /* T2: register offset. lower = Rt(4) : 000000 : imm2(2) : Rm(4).
+     * Rn==15 uses Align(PC,4) as base (same literal convention). */
     {
         int imm2 = (lower >> 4) & 3;
         int Rm   = lower & 0xF;
         uint32_t offset = cpu.r[Rm] << imm2;
-        uint32_t addr   = cpu.r[Rn] + offset;
+        uint32_t addr   = ((Rn == 15) ? ((pc + 4) & ~3u) : cpu.r[Rn]) + offset;
         int bits74 = (upper >> 4) & 0xF;
         int is_signed = ((upper >> 8) & 0xF) == 9;
 
@@ -789,7 +830,9 @@ static void t32_ldst_single(uint32_t pc, uint16_t upper, uint16_t lower) {
         case 0xC: case 0x4:
             if (L) cpu.r[Rt] = mem_read32(addr); else mem_write32(addr, cpu.r[Rt]); break;
         case 0xD: case 0x5:
-            if (L) { cpu.r[Rt] = mem_read32(addr); if (Rt==15) pc_updated=1; }
+            if (L) { cpu.r[Rt] = (Rt == 15) ? (mem_read32(addr) & ~1u)
+                                            : mem_read32(addr);
+                     if (Rt==15) pc_updated=1; }
             else   { mem_write32(addr, cpu.r[Rt]); }
             break;
         case 0x7: /* LDRSH.W T2 (signed halfword, register offset): upper[15:8]=0xF9, bits74=7 */
@@ -824,6 +867,119 @@ int thumb32_step(uint32_t pc, uint16_t upper, uint16_t lower) {
     /* Group 11101: E8xx-EFxx                                              */
     /* ------------------------------------------------------------------ */
     if (top5 == 0x1D) {
+        /* Coprocessor / VFP / FPU space (0xEC-0xEF uppers): M33 FPU
+         * instructions (e.g. EE10 0430 cfmvrdh) live in this group, NOT
+         * in the 0x1E group. No FPU is implemented; skip as NOP.
+         * Without this they fell into shifted-register DP below and
+         * corrupted registers (littleos_pico2: r4 clobbered across a
+         * runtime_init call, cascading into null calls and lockup). */
+        if ((upper & 0xFC00) == 0xEC00) {
+            return 1;
+        }
+        /* ARMv8-M TT (Test Target, TrustZone): upper = 0xE840|Rn,
+         * lower = 0xF2Rd0 (e.g. E842 F200 = tt r2, r2, used by the
+         * RP2350 SDK ROM table trampoline). All emulated memory is
+         * Secure/privileged with no MPU, so the response is 0
+         * (secure) — must be handled here, not as shifted-register DP. */
+        if ((upper & 0xFFF0) == 0xE840 && (lower & 0xFF0F) == 0xF200) {
+            int tt_rd = (lower >> 8) & 0xF;
+            if (tt_rd != 15) cpu.r[tt_rd] = 0;
+            return 1;
+        }
+        /* ARMv8-M load-acquire/store-release exclusive (M33 only; the SDK
+         * uses LDAEXB/STREXB for spinlocks/mutexes). Misdecoding these as
+         * LDRD/STRD or shifted-register DP clobbered PC (Rd=15 phantom)
+         * and hung littleos_pico2 in a ROM walk. Single-core simplification:
+         * LDAEXx = plain load, STREXx = plain store reporting success (0).
+         * upper = 0xE8C0|Rn (STREX) or 0xE8D0|Rn (LDAEX);
+         * lower = Rt:1111:01sz:Rd for STREX, Rt:1111:11sz:1111 for LDAEX
+         * (sz: 00=byte 01=half 10=word). */
+        if (((upper & 0xFFF0) == 0xE8C0 || (upper & 0xFFF0) == 0xE8D0) &&
+            (lower & 0x0F00) == 0x0F00 &&
+            (((upper & 0x0010) != 0) == ((lower & 0x0080) != 0))) {
+            int is_load = (upper & 0x0010) != 0;
+            int sz = (lower >> 4) & 0x3;
+            int Rn = upper & 0xF;
+            int Rt = (lower >> 12) & 0xF;
+            int Rd = lower & 0xF;
+            uint32_t addr = cpu.r[Rn];
+            if (is_load) {
+                uint32_t v = 0;
+                if (sz == 0) v = mem_read8(addr);
+                else if (sz == 1) v = mem_read16(addr);
+                else if (sz == 2) v = mem_read32(addr);
+                if (Rt != 15) cpu.r[Rt] = v;
+            } else {
+                if (sz == 0) mem_write8(addr, cpu.r[Rt] & 0xFF);
+                else if (sz == 1) mem_write16(addr, cpu.r[Rt] & 0xFFFF);
+                else if (sz == 2) mem_write32(addr, cpu.r[Rt]);
+                if (Rd != 15) cpu.r[Rd] = 0;  /* success */
+            }
+            return 1;
+        }
+        /* Load-acquire / store-release byte/halfword/word (M33): STLB,
+         * STLH, LDAB, LDAH (and LDAPR word form). Upper = 0xE8C0|Rn
+         * (store) or 0xE8D0|Rn (load); lower = (Rt<<12)|0xF8F (byte),
+         * 0xF9F (half) or 0xFAF (word). Without this, STLB fell into
+         * LDRD/STRD decoding and sprayed PC+4 across RAM as a
+         * double-word store (littleos_pico2 spinlock-array corruption).
+         * Barriers are NOPs; single-core-correct plain accesses. */
+        if (((upper & 0xFFF0) == 0xE8C0 || (upper & 0xFFF0) == 0xE8D0) &&
+            (lower & 0x0F00) == 0x0F00 && (lower & 0x000F) == 0x000F) {
+            int sub = (lower >> 4) & 0xF;
+            if (sub >= 0x8 && sub <= 0xA) {
+                int is_ldab = (upper & 0x0010) != 0;
+                int sz2 = sub - 0x8;
+                int Rn2 = upper & 0xF;
+                int Rt2 = (lower >> 12) & 0xF;
+                uint32_t addr2 = cpu.r[Rn2];
+                if (is_ldab) {
+                    uint32_t v = 0;
+                    if (sz2 == 0) v = mem_read8(addr2);
+                    else if (sz2 == 1) v = mem_read16(addr2);
+                    else v = mem_read32(addr2);
+                    if (Rt2 != 15) cpu.r[Rt2] = v;
+                } else {
+                    if (sz2 == 0) mem_write8(addr2, cpu.r[Rt2] & 0xFF);
+                    else if (sz2 == 1) mem_write16(addr2, cpu.r[Rt2] & 0xFFFF);
+                    else mem_write32(addr2, cpu.r[Rt2]);
+                }
+                return 1;
+            }
+        }
+        /* Table branch TBB/TBH: upper = 0xE8D0|Rn, lower = 0xF00H|Rm
+         * (H=0 TBB, H=1 TBH; E8DF F001 / E8DF F011 verified against as).
+         * This must precede the LDRD/STRD dispatch below: TBB/TBH uppers
+         * have bit6 set, so the old bit6 routing sent every table-branch
+         * to LDRD/STRD (littleos_pico2 switch jumped to 0x002C0149).
+         * Lower top nibble 0xF is unique here (LDRD/STRD never use Rt=15;
+         * LDREX/STREX live at 0xE84x/0xE85x, handled next). */
+        if ((upper & 0xFFF0) == 0xE8D0 && (lower & 0xF000) == 0xF000) {
+            t32_tbb_tbh(pc, upper, lower);
+            return 1;
+        }
+        /* LDREX (word): upper = 0xE850|Rn, lower = (Rt<<12)|0xF00
+         * (E853 2000 = ldrex r2, [r3]). Single-core simplification:
+         * plain load; the exclusive monitor always passes. Rt==15 is
+         * UNPREDICTABLE and excluded (that shape belongs to LDMIA). */
+        if ((upper & 0xFFF0) == 0xE850 && (lower & 0xF000) != 0xF000 &&
+            (lower & 0x0FFF) == 0x0F00) {
+            int ldx_rt = (lower >> 12) & 0xF;
+            if (ldx_rt != 15) cpu.r[ldx_rt] = mem_read32(cpu.r[upper & 0xF]);
+            return 1;
+        }
+        /* STREX (word): upper = 0xE840|Rn, lower = (Rt<<12)|(Rd<<8)
+         * (E846 5400 = strex r4, r5, [r6]). Plain store reporting
+         * success (Rd=0). Guards exclude TT (lower 0xF2xx, also checked
+         * first above) and UNPREDICTABLE Rd==15 shapes. */
+        if ((upper & 0xFFF0) == 0xE840 && (lower & 0xF000) != 0xF000 &&
+            (lower & 0x00FF) == 0x0000 && ((lower >> 8) & 0xF) != 0xF) {
+            int st_rt = (lower >> 12) & 0xF;
+            int st_rd = (lower >> 8) & 0xF;
+            mem_write32(cpu.r[upper & 0xF], cpu.r[st_rt]);
+            if (st_rd != 15) cpu.r[st_rd] = 0;
+            return 1;
+        }
         uint8_t bits_10_9 = (upper >> 9) & 3;
         if (bits_10_9 == 0) {
             /* Load/Store Multiple or Double */
@@ -833,23 +989,21 @@ int thumb32_step(uint32_t pc, uint16_t upper, uint16_t lower) {
             /* Simpler: upper[8]=is_DB, upper[7]=L */
             /* Check for LDRD/STRD: upper[6]=1 and upper[7:5] pattern */
             if (upper & 0x0040) {
-                /* LDRD/STRD: upper[6]=1 */
+                /* LDRD/STRD: upper[6]=1 (TBB/TBH/LDREX/STREX are decoded
+                 * above and never reach here) */
                 t32_ldrd_strd(pc, upper, lower);
             } else {
                 /* LDM/STM T2 */
-                /* Check for TBB/TBH: upper = 0xE8DF or 0xE89F ... actually */
-                /* TBB/TBH: upper[15:4] = 1110 1000 1101 = 0xE8D, lower[15:4]=0xF00? */
-                if ((upper & 0xFFF0) == 0xE8D0 && (lower & 0xFFE0) == 0xF000) {
-                    t32_tbb_tbh(pc, upper, lower);
-                } else {
-                    t32_ldst_multiple(pc, upper, lower);
-                }
+                t32_ldst_multiple(pc, upper, lower);
             }
             return 1;
         }
         if (bits_10_9 == 1) {
-            /* LDRD/STRD with different pre/post-index forms (0xE9xx) */
-            t32_ldrd_strd(pc, upper, lower);
+            /* 0xEA/0xEB (bit10=0, bit9=1): data-processing with
+             * shifted register (AND.W/ORR.W/BIC.W/ADD.W/...). Must NOT
+             * be decoded as LDRD/STRD (that misdecode made firmware
+             * BICS.W loops spin forever: LDRD never sets flags). */
+            t32_dp_shifted_reg(pc, upper, lower);
             return 1;
         }
         /* bits_10_9 == 2 or 3: Data processing shifted register */
