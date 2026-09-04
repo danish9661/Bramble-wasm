@@ -116,6 +116,10 @@ typedef struct {
     uint8_t it_mask;                /* 4-bit mask field from the IT instruction */
     uint8_t it_pos;                 /* Index of next predicated instruction (0-based) */
     uint8_t it_len;                 /* Total predicated followers (1-4) */
+    uint8_t it_suppress;            /* NZCV suppress: 16-bit insn in IT block
+                                     * must not update flags (except CMP/CMN/
+                                     * TST); set per-step in cpu_step, cleared
+                                     * by exempt handlers. Transient. */
 
 } cpu_state_t;
 

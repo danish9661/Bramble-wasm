@@ -802,6 +802,7 @@ void cpu_init(void) {
     cpu.it_mask = 0;
     cpu.it_pos = 0;
     cpu.it_len = 0;
+    cpu.it_suppress = 0;
     cpu.vtor = 0x10000100;
 
     /* Initialize memory bus to use cpu.ram */
@@ -894,10 +895,15 @@ int cpu_is_halted(void) {
  * (handlers run fresh). Taken branches inside a block are not generated
  * by compilers and abandon the block implicitly on real HW; we do not
  * track those (documented limitation).
- * Mask decoding (verified against arm-none-eabi-as: itte cc=0xBF3A,
- * itet cc=0xBF36, itt cc=0xBF3C, it cc=0xBF38): block length is
+ * Mask decoding (verified against arm-none-eabi-as: ite hi=0xBF8C,
+ * itt hi=0xBF84, itte cc=0xBF3A, itete hi=0xBF8B): block length is
  * 4 - ctz(mask); follower 1 uses the base cond; follower i (i>=2) uses
- * the base cond iff mask bit (4-i) is set, else the inverted cond.
+ * the base cond iff mask bit (4-i) EQUALS firstcond bit 0 (HW shifts the
+ * mask bit into cond<0>), else the inverted cond. The old absolute
+ * `if (!then_bit)` rule broke even conds (e.g. newlib _sbrk ITE HI).
+ * Flag rule (ARM ARM): 16-bit insns in a block do NOT update NZCV,
+ * except CMP/CMN/TST; 32-bit insns honor S. Enforced via it_suppress
+ * (save/restore NZCV around 16-bit predicated dispatch in cpu_step).
  * ======================================================================== */
 
 /* Clear predication state (fresh block boundary) */
@@ -906,6 +912,7 @@ static inline void it_clear(void) {
     cpu.it_mask = 0;
     cpu.it_pos = 0;
     cpu.it_len = 0;
+    cpu.it_suppress = 0;
 }
 
 /* Count trailing zeros of a 4-bit mask (block length = 4 - ctz) */
@@ -935,8 +942,13 @@ static inline int it_check_skip(uint32_t pc) {
     if ((iw >> 8) == 0xBF && (iw & 0x000F) != 0) return 0;
     uint8_t cond = cpu.it_base;
     if (cpu.it_pos > 0) {
-        uint8_t then_bit = (cpu.it_mask >> (4 - cpu.it_pos)) & 1;
-        if (!then_bit) cond ^= 1;
+        /* Then/Else is relative to firstcond<0>: "Then" means the mask bit
+         * equals firstcond bit 0 (HW shifts the mask bit into cond<0>).
+         * `ite hi` (mask 0xC) must give LS for slot 2; the old
+         * `if (!then_bit)` form inverted this for even conds and broke
+         * newlib _sbrk (ITE HI + STRLS never executed -> malloc NULL). */
+        uint8_t te_bit = (cpu.it_mask >> (4 - cpu.it_pos)) & 1;
+        if (te_bit != (cpu.it_base & 1)) cond ^= 1;
     }
     int pass = t32_check_cond(cond);
     cpu.it_pos++;
@@ -1301,8 +1313,11 @@ static void __attribute__((hot)) timing_tick(uint32_t cycles) {
 
 __attribute__((hot)) void cpu_step(void) {
     uint32_t pc = cpu.r[15];
-    /* IT-block predication (rare path: single predictable branch) */
-    if (__builtin_expect(cpu.it_len != 0, 0) && it_check_skip(pc)) {
+    /* IT-block predication (rare path: single predictable branch).
+     * Capture block membership BEFORE it_check_skip consumes a slot:
+     * the last follower clears it_len, but still executes predicated. */
+    int in_it_block = (cpu.it_len != 0);
+    if (__builtin_expect(in_it_block, 0) && it_check_skip(pc)) {
         uint16_t iw = cpu_fetch16_fast(pc);
         cpu.r[15] = pc + (((iw >> 11) >= 0x1D) ? 4 : 2);
         timing_tick(1);
@@ -1483,6 +1498,15 @@ pc_valid:
 
     /* 16-bit instruction dispatch via table (with cache) */
     pc_updated = 0;
+    /* In an IT block, 16-bit insns (except CMP/CMN/TST, which clear
+     * it_suppress themselves) must not update NZCV: save and restore
+     * around the handler. 32-bit insns honor S and are untouched. */
+    uint32_t saved_nzcv = 0;
+    int do_suppress = in_it_block;
+    if (do_suppress) {
+        saved_nzcv = cpu.xpsr & 0xF0000000u;
+        cpu.it_suppress = 1;
+    }
     thumb_handler_t handler;
     if (cached_handler) {
         handler = cached_handler;
@@ -1497,6 +1521,9 @@ pc_valid:
         }
     }
     handler(instr);
+    if (do_suppress && cpu.it_suppress)
+        cpu.xpsr = (cpu.xpsr & ~0xF0000000u) | saved_nzcv;
+    cpu.it_suppress = 0;
 
     if (!pc_updated) {
         cpu.r[15] = pc + 2;

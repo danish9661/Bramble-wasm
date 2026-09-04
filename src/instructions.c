@@ -144,6 +144,7 @@ void instr_sub_reg_reg(uint16_t instr) {
 }
 
 void instr_cmp_imm8(uint16_t instr) {
+    cpu.it_suppress = 0; /* CMP always updates flags, even in IT blocks */
     uint8_t reg = (instr >> 8) & 0x07;
     uint8_t imm = instr & 0xFF;
     uint32_t op1 = cpu.r[reg];
@@ -153,6 +154,7 @@ void instr_cmp_imm8(uint16_t instr) {
 
 /* CMP with high registers (0x4500-0x45FF): 4-bit register fields */
 void instr_cmp_reg_reg(uint16_t instr) {
+    cpu.it_suppress = 0; /* CMP always updates flags, even in IT blocks */
     uint8_t reg_src = (instr >> 3) & 0x0F;
     uint8_t reg_dst = ((instr >> 4) & 0x08) | (instr & 0x07);
     uint32_t op1 = cpu.r[reg_dst];
@@ -163,6 +165,7 @@ void instr_cmp_reg_reg(uint16_t instr) {
 
 /* CMP in ALU block (0x4280-0x42BF): 3-bit register fields only */
 void instr_cmp_alu(uint16_t instr) {
+    cpu.it_suppress = 0; /* CMP always updates flags, even in IT blocks */
     uint8_t rn = instr & 0x07;
     uint8_t rm = (instr >> 3) & 0x07;
     uint32_t op1 = cpu.r[rn];
@@ -556,6 +559,7 @@ void instr_strh_reg_offset(uint16_t instr) {
 /* ============ Bitwise Instructions ============ */
 
 void instr_tst_reg_reg(uint16_t instr) {
+    cpu.it_suppress = 0; /* TST always updates flags, even in IT blocks */
     uint8_t reg_src = (instr >> 3) & 0x07;
     uint8_t reg_dst = instr & 0x07;
     uint32_t result = cpu.r[reg_dst] & cpu.r[reg_src];
@@ -815,6 +819,7 @@ void instr_rsbs(uint16_t instr) {
 // ============================================================================
 
 void instr_cmn_reg(uint16_t instr) {
+    cpu.it_suppress = 0; /* CMN always updates flags, even in IT blocks */
     uint8_t rn = instr & 0x07;
     uint8_t rm = (instr >> 3) & 0x07;
     uint32_t op1 = cpu.r[rn];
@@ -857,6 +862,7 @@ void instr_add_high_reg(uint16_t instr) {
 }
 
 void instr_cmp_high_reg(uint16_t instr) {
+    cpu.it_suppress = 0; /* CMP always updates flags, even in IT blocks */
     instr_cmp_reg_reg(instr);
 }
 

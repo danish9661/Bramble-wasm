@@ -1112,6 +1112,21 @@ TEST(test_adc_cs_ready) {
     PASS();
 }
 
+TEST(test_rp2350_adc_base) {
+    /* RP2350 moved ADC to 0x400A0000 (same layout). Without routing,
+     * SDK adc_init spins forever on CS.READY and littleos_pico2 hangs
+     * in supervisor_init's single-core fallback. */
+    int saved_mode = membus_rp2350_mode;
+    membus_rp2350_mode = 1;
+    adc_init();
+    mem_write32(RP2350_ADC_BASE + 0x00, 0x1); /* EN, as SDK adc_init does */
+    ASSERT_TRUE(mem_read32(RP2350_ADC_BASE + 0x00) & (1u << 8),
+                "RP2350 ADC CS.READY via membus");
+    membus_rp2350_mode = saved_mode;
+    adc_init();
+    PASS();
+}
+
 TEST(test_adc_temp_sensor) {
     adc_init();
     adc_write32(ADC_BASE + 0x00, (4u << 12) | (1u << 16) | (1u << 0));
@@ -3992,6 +4007,158 @@ TEST(test_it_block_predication) {
     PASS();
 }
 
+TEST(test_it_block_even_cond) {
+    /* Even base cond (C0=0, e.g. HI): Then/Else bit is relative to
+     * firstcond<0>, not absolute. `ite hi` (0xBF8C) + movhi/movls must
+     * run the second slot when LS holds. The old `if (!then_bit)` form
+     * inverted this and broke newlib _sbrk (ITE HI + STRLS skipped). */
+    reset_cpu();
+    uint32_t pc = RAM_BASE + 0x1000;
+    mem_write16(pc + 0, 0xBF8C); /* ite hi */
+    mem_write16(pc + 2, 0x4604); /* movhi r4, r0 */
+    mem_write16(pc + 4, 0x4611); /* movls r1, r2 -> r1 */
+    mem_write16(pc + 6, 0xBF00); /* nop */
+    /* HI false (C=0): first skipped, second (LS) runs. */
+    cpu.r[0] = 0xAAAAAAAA; cpu.r[2] = 0xCCCCCCCC;
+    cpu.r[4] = 0; cpu.r[1] = 0;
+    cpu.xpsr &= ~0x20000000u; /* C=0 */
+    cpu.r[15] = pc;
+    for (int i = 0; i < 4 && !cpu_is_halted(); i++) cpu_step();
+    ASSERT_EQ(0, cpu.r[4], "movhi skipped when HI false");
+    ASSERT_EQ(0xCCCCCCCC, cpu.r[1], "movls executes when LS true");
+    /* HI true (C=1,Z=0): first runs, second skipped. */
+    reset_cpu();
+    mem_write16(pc + 0, 0xBF8C);
+    mem_write16(pc + 2, 0x4604);
+    mem_write16(pc + 4, 0x4611);
+    mem_write16(pc + 6, 0xBF00);
+    cpu.r[0] = 0xAAAAAAAA; cpu.r[2] = 0xCCCCCCCC;
+    cpu.r[4] = 0; cpu.r[1] = 0;
+    cpu.xpsr |= 0x20000000u; cpu.xpsr &= ~0x10000000u; /* C=1,Z=0 */
+    cpu.r[15] = pc;
+    for (int i = 0; i < 4 && !cpu_is_halted(); i++) cpu_step();
+    ASSERT_EQ(0xAAAAAAAA, cpu.r[4], "movhi executes when HI true");
+    ASSERT_EQ(0, cpu.r[1], "movls skipped when LS false");
+    PASS();
+}
+
+TEST(test_it_block_sbrk_pattern) {
+    /* Exact newlib _sbrk tail: ITE HI + 32-bit MOVHI.W + STRLS.
+     * With r3 < limit (LS true) the store must execute and update the
+     * heap pointer; the 32-bit slot must advance PC by 4. */
+    reset_cpu();
+    uint32_t pc = RAM_BASE + 0x1000;
+    uint32_t cell = RAM_BASE + 0x2000;
+    mem_write16(pc + 0, 0xBF8C); /* ite hi */
+    mem_write16(pc + 2, 0xF04F); /* movhi.w r0, #0xFFFFFFFF (hw1) */
+    mem_write16(pc + 4, 0x30FF); /* (hw2) */
+    mem_write16(pc + 6, 0x6013); /* strls r3, [r2, #0] */
+    mem_write16(pc + 8, 0xBF00); /* nop */
+    cpu.r[2] = cell; cpu.r[3] = 0x20057900u; cpu.r[0] = 0xDEADBEEFu;
+    mem_write32(cell, 0);
+    cpu.xpsr &= ~(0x20000000u | 0x10000000u); /* C=0,Z=0 -> HI false, LS true */
+    cpu.r[15] = pc;
+    for (int i = 0; i < 4 && !cpu_is_halted(); i++) cpu_step();
+    ASSERT_EQ(0xDEADBEEFu, cpu.r[0], "movhi.w skipped when HI false");
+    ASSERT_EQ(0x20057900u, mem_read32(cell), "strls executes when LS true");
+    ASSERT_EQ(pc + 10, cpu.r[15], "PC advances past IT block with 32-bit slot");
+    PASS();
+}
+
+TEST(test_it_block_no_flag_update) {
+    /* newlib strlen tail: `itt eq` + ldreq.w/addeq + beq. The 16-bit
+     * ADDEQ inside the block must NOT update flags: Z stays set from the
+     * earlier ANDS so BEQ loops. Without suppression ADDEQ clears Z,
+     * strlen exits early and returns garbage (littleos_pico2 got
+     * len=0x20000003 for a ~70-char string -> 512MB UART dump). */
+    reset_cpu();
+    uint32_t pc = RAM_BASE + 0x1000;
+    mem_write16(pc + 0, 0xBF04); /* itt eq */
+    mem_write16(pc + 2, 0x3004); /* addeq r0, #4 */
+    mem_write16(pc + 4, 0x3004); /* addeq r0, #4 */
+    mem_write16(pc + 6, 0xD001); /* beq pc+12 (taken iff Z preserved) */
+    mem_write16(pc + 8, 0x2163); /* movs r1, #99 (skipped iff taken) */
+    mem_write16(pc + 10, 0xBF00); /* nop */
+    mem_write16(pc + 12, 0xBF00); /* nop */
+    cpu.r[0] = 0; cpu.r[1] = 0;
+    cpu.xpsr |= 0x40000000u; /* Z=1 */
+    cpu.xpsr &= ~0x20000000u;
+    cpu.r[15] = pc;
+    for (int i = 0; i < 6 && !cpu_is_halted(); i++) cpu_step();
+    ASSERT_EQ(8, cpu.r[0], "both addeq run when EQ true");
+    ASSERT_EQ(0, cpu.r[1], "beq taken: marker skipped");
+    ASSERT_TRUE((cpu.xpsr & 0x40000000u) != 0, "Z preserved through IT block");
+    PASS();
+}
+
+TEST(test_it_block_cmp_updates_flags) {
+    /* CMP/CMN/TST are exempt from suppression. `ite eq` + cmp/movs:
+     * predicated by IT state (raw encodings carry no cond bits). */
+    reset_cpu();
+    uint32_t pc = RAM_BASE + 0x1000;
+    mem_write16(pc + 0, 0xBF0C); /* ite eq */
+    mem_write16(pc + 2, 0x2800); /* cmp r0, #0 (runs iff EQ) */
+    mem_write16(pc + 4, 0x2001); /* movs r0, #1 (runs iff NE) */
+    mem_write16(pc + 6, 0xBF00); /* nop */
+    cpu.r[0] = 5; /* Z=0 -> EQ false: cmp skipped, movs runs */
+    cpu.xpsr &= ~0x40000000u;
+    cpu.r[15] = pc;
+    for (int i = 0; i < 4 && !cpu_is_halted(); i++) cpu_step();
+    ASSERT_EQ(1, cpu.r[0], "movs runs when EQ false");
+    /* Now EQ true: cmp runs and must SET Z even inside the block. */
+    reset_cpu();
+    mem_write16(pc + 0, 0xBF0C);
+    mem_write16(pc + 2, 0x2800);
+    mem_write16(pc + 4, 0x2001);
+    mem_write16(pc + 6, 0xBF00);
+    cpu.r[0] = 0;
+    cpu.xpsr |= 0x40000000u;
+    cpu.r[15] = pc;
+    for (int i = 0; i < 4 && !cpu_is_halted(); i++) cpu_step();
+    ASSERT_EQ(0, cpu.r[0], "movs skipped when EQ true");
+    ASSERT_TRUE((cpu.xpsr & 0x40000000u) != 0, "cmp sets Z in IT block");
+    PASS();
+}
+
+TEST(test_sbc_borrow_carry) {
+    /* 32-bit SBCS.W must fold the borrow-in into C. Pattern from
+     * hstx_dvi_start's 64-bit timeout wait (cmp lo / sbcs.w hi / bcc):
+     * with equal high words and a borrow from the low compare, C must
+     * clear so BCC fires. The old update_sub_flags(rn, imm, res) kept C
+     * set and the DVI wait looped forever (2.8B steps, no timeout). */
+    reset_cpu();
+    uint32_t pc = RAM_BASE + 0x1000;
+    mem_write16(pc + 0, 0xEB76); /* sbcs.w r1, r6, r1 (hw1) */
+    mem_write16(pc + 2, 0x0101); /* (hw2) */
+    mem_write16(pc + 4, 0xD301); /* bcc pc+12 (taken iff C==0) */
+    mem_write16(pc + 6, 0x2063); /* movs r0, #99 (skipped iff taken) */
+    mem_write16(pc + 8, 0xBF00); /* nop */
+    mem_write16(pc + 10, 0xBF00); /* nop */
+    cpu.r[6] = 0; cpu.r[1] = 0; cpu.r[0] = 0;
+    cpu.xpsr &= ~0x20000000u; /* C=0 -> borrow-in=1 */
+    cpu.r[15] = pc;
+    for (int i = 0; i < 5 && !cpu_is_halted(); i++) cpu_step();
+    ASSERT_EQ(0xFFFFFFFFu, cpu.r[1], "0-0-1 borrows to 0xFFFFFFFF");
+    ASSERT_TRUE((cpu.xpsr & 0x20000000u) == 0, "borrow clears C");
+    ASSERT_EQ(0, cpu.r[0], "bcc taken: marker skipped");
+    /* No-borrow case: C=1, equal words -> C stays set, BCC not taken. */
+    reset_cpu();
+    mem_write16(pc + 0, 0xEB76);
+    mem_write16(pc + 2, 0x0101);
+    mem_write16(pc + 4, 0xD301);
+    mem_write16(pc + 6, 0x2063);
+    mem_write16(pc + 8, 0xBF00);
+    mem_write16(pc + 10, 0xBF00);
+    cpu.r[6] = 5; cpu.r[1] = 5; cpu.r[0] = 0;
+    cpu.xpsr |= 0x20000000u; /* C=1 -> borrow-in=0 */
+    cpu.r[15] = pc;
+    for (int i = 0; i < 5 && !cpu_is_halted(); i++) cpu_step();
+    ASSERT_EQ(0, cpu.r[1], "5-5-0 is exact");
+    ASSERT_TRUE((cpu.xpsr & 0x20000000u) != 0, "no borrow keeps C set");
+    ASSERT_EQ(99, cpu.r[0], "bcc not taken: marker runs");
+    PASS();
+}
+
 /* ========================================================================
  * Wire Protocol Tests
  * ======================================================================== */
@@ -5377,6 +5544,7 @@ int main(void) {
 
     BEGIN_CATEGORY("ADC");
     RUN_TEST(test_adc_cs_ready);
+    RUN_TEST(test_rp2350_adc_base);
     RUN_TEST(test_adc_temp_sensor);
     RUN_TEST(test_adc_set_channel_value);
     END_CATEGORY("ADC");
@@ -5693,6 +5861,11 @@ int main(void) {
     RUN_TEST(test_wfi_sets_core_flag);
     RUN_TEST(test_it_hint_decode);
     RUN_TEST(test_it_block_predication);
+    RUN_TEST(test_it_block_even_cond);
+    RUN_TEST(test_it_block_sbrk_pattern);
+    RUN_TEST(test_it_block_no_flag_update);
+    RUN_TEST(test_it_block_cmp_updates_flags);
+    RUN_TEST(test_sbc_borrow_carry);
     END_CATEGORY("Core Pool / Threading");
 
     BEGIN_CATEGORY("Wire Protocol");

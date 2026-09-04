@@ -599,7 +599,12 @@ static int is_clocks_addr(uint32_t addr) {
 }
 
 static int is_adc_addr(uint32_t addr) {
-    return (addr & ~0x3FFF) == ADC_BASE;
+    if ((addr & ~0x3FFF) == ADC_BASE) return 1;
+    /* RP2350 moved ADC to 0x400A0000 (same layout); without this,
+     * adc_init spins forever on CS.READY (littleos_pico2 hung in
+     * supervisor_init single-core fallback). */
+    if (membus_rp2350_mode && (addr & ~0x3FFF) == RP2350_ADC_BASE) return 1;
+    return 0;
 }
 
 /* ========================================================================

@@ -160,8 +160,21 @@ static void t32_dp_exec(int op, int S, int Rn, int Rd, uint32_t imm32, int shift
     }
     case 0xB: { /* SBC */
         uint32_t c = (cpu.xpsr & FLAG_C) ? 1u : 0u;
-        res = rn - imm32 - (1u - c);
-        if (S) update_sub_flags(rn, imm32, res);
+        uint32_t b = 1u - c;
+        res = rn - imm32 - b;
+        if (S) {
+            /* Carry = NOT borrow from rn - imm32 - b in full precision.
+             * update_sub_flags(rn, imm32, res) is WRONG here: it ignores
+             * the borrow-in, so C stays set when rn == imm32 with borrow
+             * (broke 64-bit timeout loops like hstx_dvi_start's
+             * cmp/sbcs/bcc, which never fired). Mirrors instr_sbcs. */
+            cpu.xpsr &= ~(FLAG_N | FLAG_Z | FLAG_C | FLAG_V);
+            if (res == 0) cpu.xpsr |= FLAG_Z;
+            if (res & 0x80000000u) cpu.xpsr |= FLAG_N;
+            uint64_t ures = (uint64_t)rn - (uint64_t)imm32 - (uint64_t)b;
+            if ((ures >> 32) == 0) cpu.xpsr |= FLAG_C;
+            if (((rn ^ imm32) & (rn ^ res)) & 0x80000000u) cpu.xpsr |= FLAG_V;
+        }
         break;
     }
     case 0xD: /* SUB / CMP (Rd=15,S) */

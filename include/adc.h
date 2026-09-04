@@ -11,6 +11,11 @@
 /* ADC Base Address */
 #define ADC_BASE                0x4004C000
 
+/* RP2350 moved ADC (same block + aliases; register layout identical) */
+#ifndef RP2350_ADC_BASE
+#define RP2350_ADC_BASE         0x400A0000
+#endif
+
 /* ADC Registers */
 #define ADC_CS                  (ADC_BASE + 0x00)  /* Control and status */
 #define ADC_RESULT              (ADC_BASE + 0x04)  /* Conversion result */

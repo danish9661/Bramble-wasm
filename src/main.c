@@ -382,6 +382,7 @@ int main(int argc, char **argv) {
         fprintf(stderr, "  -trace <file>         Write instruction trace to binary file\n");
         fprintf(stderr, "  -exit-code <addr>     Read exit code from RAM address on halt\n");
         fprintf(stderr, "  -timeout <seconds>    Kill emulator after N seconds (exit 124)\n");
+        fprintf(stderr, "  -max-steps <N>      Safety step cap (default 1000000000, 0=unlimited)\n");
         fprintf(stderr, "  -symbols <elf>        Load ELF symbols for readable reports\n");
         fprintf(stderr, "  -script <file>        Scripted I/O (timestamped UART/GPIO input)\n");
         fprintf(stderr, "  -expect <file>        Compare stdout against golden file (exit 0/1)\n");
@@ -426,6 +427,7 @@ int main(int argc, char **argv) {
     char *trace_path = NULL;
     char *exit_code_arg = NULL;
     int timeout_secs = 0;
+    uint64_t max_steps = 1000000000ULL; /* Safety step cap (0 = unlimited) */
     char *symbols_path = NULL;
     char *script_path = NULL;
     char *expect_file = NULL;
@@ -647,6 +649,10 @@ int main(int argc, char **argv) {
         } else if (strcmp(argv[i], "-timeout") == 0) {
             if (i + 1 < argc) {
                 timeout_secs = atoi(argv[++i]);
+            }
+        } else if (strcmp(argv[i], "-max-steps") == 0) {
+            if (i + 1 < argc) {
+                max_steps = strtoull(argv[++i], NULL, 0);
             }
         } else if (strcmp(argv[i], "-symbols") == 0) {
             if (i + 1 < argc) symbols_path = argv[++i];
@@ -1267,8 +1273,9 @@ skip_fuse:
             if (timeout_expired || semihost_exit_requested) break;
 
             /* Safety limit */
-            if (!stdin_enabled && step_count > 1000000000) {
-                fprintf(stderr, "[Warning] Instruction limit reached (1B)\n");
+            if (!stdin_enabled && max_steps > 0 && step_count > max_steps) {
+                fprintf(stderr, "[Warning] Instruction limit reached (%llu)\n",
+                        (unsigned long long)max_steps);
                 break;
             }
         }
@@ -1355,11 +1362,12 @@ skip_fuse:
             if (semihost_exit_requested) break;
 
             /* Safety limit */
-            if (!stdin_enabled && step_count > 1000000) {
+            if (!stdin_enabled && max_steps > 0 && step_count > 1000000) {
                 /* Approximate: each poll ~= 1000 instructions */
                 instruction_count = cores[CORE0].step_count + cores[CORE1].step_count;
-                if (instruction_count > 1000000000) {
-                    fprintf(stderr,"[Warning] Instruction limit reached (1B)\n");
+                if (instruction_count > max_steps) {
+                    fprintf(stderr,"[Warning] Instruction limit reached (%llu)\n",
+                            (unsigned long long)max_steps);
                     break;
                 }
             }
@@ -1463,8 +1471,10 @@ skip_fuse:
 
             /* Safety limit: prevent infinite loops (disabled in interactive/GDB mode) */
             instruction_count = cores[CORE0].step_count + cores[CORE1].step_count;
-            if (!gdb_enabled && !stdin_enabled && instruction_count > 1000000000) {
-                fprintf(stderr,"[Warning] Instruction limit reached (1B)\n");
+            if (!gdb_enabled && !stdin_enabled && max_steps > 0 &&
+                instruction_count > max_steps) {
+                fprintf(stderr,"[Warning] Instruction limit reached (%llu)\n",
+                        (unsigned long long)max_steps);
                 break;
             }
         }
