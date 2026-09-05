@@ -122,6 +122,9 @@ typedef struct {
                                      * by exempt handlers. Transient. */
     uint32_t vfp_s[32];             /* VFP single-precision reg file (bits) */
     uint32_t vfp_fpscr;             /* FPSCR: only NZCV (bits 31:28) modeled */
+    uint64_t dcp_x, dcp_y, dcp_ef;  /* DCP double-coprocessor operand state */
+    uint8_t dcp_from_int;           /* last int write was WXUC/WXIC (RDDS=Id) */
+    uint8_t dcp_rmode;              /* 0=truncate (NTDC), 1=round (NRDC) */
 
 } cpu_state_t;
 

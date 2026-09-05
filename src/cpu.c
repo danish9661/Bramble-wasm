@@ -805,6 +805,11 @@ void cpu_init(void) {
     cpu.it_suppress = 0;
     memset(cpu.vfp_s, 0, sizeof(cpu.vfp_s));
     cpu.vfp_fpscr = 0;
+    cpu.dcp_x = 0;
+    cpu.dcp_y = 0;
+    cpu.dcp_ef = 0;
+    cpu.dcp_from_int = 0;
+    cpu.dcp_rmode = 0;
     cpu.vtor = 0x10000100;
 
     /* Initialize memory bus to use cpu.ram */

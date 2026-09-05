@@ -336,7 +336,20 @@ static void t32_dp_shifted_reg(uint32_t pc, uint16_t upper, uint16_t lower) {
     int      Rm    = lower & 0xF;
     int      n     = (imm3 << 2) | imm2;
     int      carry = 0;
-    uint32_t shifted = t32_shift_c(cpu.r[Rm], type, n, &carry);
+    uint32_t shifted;
+    if (type == 3 && n == 0) {
+        /* RRX (DecodeImmShift: ROR with imm3:imm2 == 0). Carry_in goes to
+         * bit31, carry_out is old bit0. S==0 preserves flags (t32_dp_exec
+         * only writes flags when S set). pico_double __aeabi_f2d relies on
+         * the stale C from `lsls` surviving `mov.w`+ASR into this RRX;
+         * without it every float->double promotion (printf %.1f) broke. */
+        uint32_t rmv = cpu.r[Rm];
+        carry = rmv & 1;
+        shifted = ((cpu.xpsr & FLAG_C) ? 0x80000000u : 0) | (rmv >> 1);
+    } else {
+        if (type != 0 && n == 0) n = 32;  /* LSR#32 / ASR#32 */
+        shifted = t32_shift_c(cpu.r[Rm], type, n, &carry);
+    }
     t32_dp_exec(op, S, Rn, Rd, shifted, carry);
 }
 
@@ -940,6 +953,24 @@ static uint32_t vfp_f2u(float f) {
     return (uint32_t)((int32_t)(f - 2147483648.0f)) + 0x80000000u;
 }
 
+/* double -> int32/uint32 for DCP RDIC/RDUC (round mode: 0 trunc, 1 near). */
+static int32_t dcp_d2i(double f, int rnd) {
+    double r = rnd ? nearbyint(f) : trunc(f);
+    if (isnan(r)) return 0;
+    if (r >= 2147483648.0) return INT32_MAX;
+    if (r <= -2147483648.0) return INT32_MIN;
+    return (int32_t)r;
+}
+
+static uint32_t dcp_d2u(double f, int rnd) {
+    double r = rnd ? nearbyint(f) : trunc(f);
+    if (isnan(r)) return 0;
+    if (r <= 0.0) return 0;
+    if (r >= 4294967296.0) return UINT32_MAX;
+    if (r < 2147483648.0) return (uint32_t)(int32_t)r;
+    return (uint32_t)((int32_t)(r - 2147483648.0)) + 0x80000000u;
+}
+
 /* VCMP(E).F32: NZCV into FPSCR (V always 0). ARM rule: C is set for
  * equal and unordered ONLY, not greater-than (unlike SUB borrow!).
  * GT must yield all-clear or BHI/BLS invert (littleOS shell crash).
@@ -951,6 +982,249 @@ static void vfp_cmp(float a, float b) {
     else if (a < b)                nzcv = FLAG_N;
     else                           nzcv = 0;
     cpu.vfp_fpscr = nzcv;
+}
+
+/* ========================================================================
+ * RP2350 DCP double-precision coprocessor (deferred-compute model)
+ *
+ * Firmware routes ALL double math through pico_double's DCP assembly
+ * (dcp_*_m canned sequences: WX/WY operand writes, CDP micro-ops,
+ * RD/RCMP result reads). The engine is multi-cycle stateful HW; we
+ * model it functionally: snapshot operands on writes, compute exact
+ * IEEE-754 results (host double) at terminal reads. Intermediate
+ * micro-ops (mantissa shuffles, NRxx/NORM) and their integer fixups are
+ * straight-line with no control flow on DCP state (verified against the
+ * canned sequences), so ignoring them is behavior-preserving.
+ * Engagement (PCMP) always reads not-engaged: ops complete instantly,
+ * so save/restore (exact 64-bit round-trip via PXMD/PYMD/REFD and
+ * WXMD/WYMD/WEFD) never triggers spuriously. Nested DCP use across an
+ * interrupt would clobber state (same limitation as VFP dual-core).
+ * Field layouts verified mechanically against arm-none-eabi-as:
+ *   MCRR: hw1=0xEC40|Rt2, hw2=Rt<<12|0x400|opc1<<4|CRm
+ *   MRRC: hw1=0xEC50|Rt2, hw2=Rt<<12|0x400|opc1<<4|CRm
+ *   MRC:  hw1=0xEE10,     hw2=Rt<<12|0x400|(opc2<<5)|CRm
+ *   CDP:  hw1=0xEE00|(opc1<<4), hw2=0x0400|(opc2<<5)|CRm (CRd=CRn=c0)
+ *   MRC2: hw1=0xFE10,     hw2=Rt<<12|0x400|(opc2<<5)|CRm
+ *   MRRC2: hw1=0xFC50|Rt2, hw2=Rt<<12|0x400|opc1<<4|CRm
+ * MRC/CDP share EE10+0x04xx space, split by lower bit4 (MRC=1, CDP=0).
+ * ======================================================================== */
+static inline double dcp_as_double(uint64_t u) {
+    double d; memcpy(&d, &u, 8); return d;
+}
+static inline uint64_t dcp_as_bits(double d) {
+    uint64_t u; memcpy(&u, &d, 8); return u;
+}
+static inline float dcp_as_float(uint32_t u) {
+    float f; memcpy(&f, &u, 4); return f;
+}
+static inline uint32_t dcp_float_bits(float f) {
+    uint32_t u; memcpy(&u, &f, 4); return u;
+}
+
+/* DCP RCMP NZCV: SUB-like ordered flags; unordered sets V (not Z/C).
+ * Verified against dcmplt/dcmpeq/dcmpun/ite-hi users: unordered must give
+ * HI=0 (C=0,Z=0) yet V=1 for the bvs fixups and dcmpun's bit28 extract. */
+static uint32_t dcp_cmp_flags(double a, double b) {
+    if (isnan(a) || isnan(b)) return FLAG_V;
+    if (a == b) return FLAG_Z | FLAG_C;
+    if (a < b)  return FLAG_N;
+    return FLAG_C;
+}
+
+/* Best-effort 64-bit mantissa state (hidden bit explicit) for RXMS-style
+ * reads. Nothing branches on these in any canned sequence; exact layout
+ * is unobservable behaviorally. */
+static uint64_t dcp_mantissa(double d) {
+    uint64_t u = dcp_as_bits(d);
+    uint64_t exp = (u >> 52) & 0x7FFu;
+    uint64_t man = u & 0xFFFFFFFFFFFFFULL;
+    if (exp != 0 && exp != 0x7FFu) man |= 1ULL << 52;
+    return man;
+}
+
+/* Execute a DCP instruction. Returns 1 if DCP-shaped (handled or explicit
+ * NOP), 0 otherwise (caller falls through to VFP/misc/ldst). Covers the
+ * MCRR/MRRC/CDP/MRC shapes; MRC2/MRRC2 handled by t32_dcp2. */
+static int t32_dcp(uint32_t pc, uint16_t upper, uint16_t lower) {
+    (void)pc;
+    /* MCRR writes: hw1=0xEC40|Rt2, hw2=Rt<<12|0x400|opc1<<4|CRm */
+    if ((upper & 0xFFF0) == 0xEC40 && (lower & 0x0F00) == 0x0400) {
+        int Rt = (lower >> 12) & 0xF, Rt2 = upper & 0xF;
+        int opc1 = (lower >> 4) & 0xF, crm = lower & 0xF;
+        uint64_t v = (uint64_t)cpu.r[Rt] | ((uint64_t)cpu.r[Rt2] << 32);
+        switch (opc1) {
+        case 0: /* WXMD/WYMD/WEFD: exact state write (save/restore) */
+            if (crm == 0) cpu.dcp_x = v;
+            else if (crm == 1) cpu.dcp_y = v;
+            else if (crm == 2) cpu.dcp_ef = v;
+            else return 0;
+            return 1;
+        case 1: /* WXUP/WYUP/WXYU */
+            if (crm == 0) { cpu.dcp_x = v; cpu.dcp_from_int = 0; }
+            else if (crm == 1) { cpu.dcp_y = v; cpu.dcp_from_int = 0; }
+            else if (crm == 2) {
+                cpu.dcp_x = dcp_as_bits((double)dcp_as_float((uint32_t)v));
+                cpu.dcp_y = dcp_as_bits((double)dcp_as_float((uint32_t)(v >> 32)));
+                cpu.dcp_from_int = 0;
+            } else return 0;
+            return 1;
+        case 2: /* WXMS */
+        case 3: /* WXMO */
+        case 4: /* WXDD */
+        case 5: /* WXDQ */
+            if (crm != 0) return 0;
+            return 1; /* intermediate state: ignored (see header) */
+        case 6: /* WXUC */
+            if (crm != 0) return 0;
+            cpu.dcp_x = dcp_as_bits((double)(uint32_t)cpu.r[Rt]);
+            cpu.dcp_from_int = 1;
+            return 1;
+        case 7: /* WXIC */
+            if (crm != 0) return 0;
+            cpu.dcp_x = dcp_as_bits((double)(int32_t)cpu.r[Rt]);
+            cpu.dcp_from_int = 1;
+            return 1;
+        case 8: /* WXDC */
+            if (crm != 0) return 0;
+            cpu.dcp_x = v;
+            cpu.dcp_from_int = 0;
+            return 1;
+        case 9: /* WXFC */
+            if (crm != 2) return 0;
+            cpu.dcp_x = dcp_as_bits((double)dcp_as_float((uint32_t)v));
+            cpu.dcp_from_int = 0;
+            return 1;
+        case 10: /* WXFM */
+        case 11: /* WXFD */
+        case 12: /* WXFQ */
+            if (crm != 0 && crm != 2) return 0;
+            return 1; /* float-fma paths: unused by linked code */
+        default:
+            return 0;
+        }
+    }
+    /* MRRC reads: hw1=0xEC50|Rt2, hw2=Rt<<12|0x400|opc1<<4|CRm */
+    if ((upper & 0xFFF0) == 0xEC50 && (lower & 0x0F00) == 0x0400) {
+        int Rt = (lower >> 12) & 0xF, Rt2 = upper & 0xF;
+        int opc1 = (lower >> 4) & 0xF, crm = lower & 0xF;
+        double X = dcp_as_double(cpu.dcp_x), Y = dcp_as_double(cpu.dcp_y);
+        if (opc1 == 0) {
+            uint64_t v = 0;
+            if (crm == 8) v = cpu.dcp_x;
+            else if (crm == 9) v = cpu.dcp_y;
+            else if (crm == 10) v = cpu.dcp_ef;
+            else return 0;
+            if (Rt != 15) cpu.r[Rt] = (uint32_t)v;
+            if (Rt2 != 15) cpu.r[Rt2] = (uint32_t)(v >> 32);
+            return 1;
+        }
+        if (crm == 4 || crm == 5) {
+            /* RXMS/RYMS: mantissa state (best-effort; no control flow
+             * depends on it in any canned sequence). */
+            uint64_t m = dcp_mantissa(crm == 4 ? X : Y);
+            if (Rt != 15) cpu.r[Rt] = (uint32_t)m;
+            if (Rt2 != 15) cpu.r[Rt2] = (uint32_t)(m >> 32);
+            return 1;
+        }
+        if (crm == 1) {
+            /* RXYH/RYMR/RXMQ halves (best-effort, see above). */
+            uint32_t lo = 0, hi = 0;
+            if (opc1 == 1) { lo = (uint32_t)(cpu.dcp_x >> 32); hi = (uint32_t)(cpu.dcp_y >> 32); }
+            else if (opc1 == 2) { lo = (uint32_t)(cpu.dcp_y >> 32); hi = (uint32_t)cpu.dcp_y; }
+            else if (opc1 == 4) { lo = (uint32_t)(cpu.dcp_x >> 32); hi = (uint32_t)cpu.dcp_x; }
+            else return 0;
+            if (Rt != 15) cpu.r[Rt] = lo;
+            if (Rt2 != 15) cpu.r[Rt2] = hi;
+            return 1;
+        }
+        if (crm == 0) {
+            /* RDDA/RDDS/RDDM/RDDD/RDDQ/RDDG result reads. */
+            double r = 0;
+            int ok = 1;
+            switch (opc1) {
+            case 1: r = X + Y; break;
+            case 3: r = cpu.dcp_from_int ? X : X - Y; break;
+            case 5: r = X * Y; break;
+            case 7: r = X / Y; break;
+            case 9: r = sqrt(X); break;
+            case 11: r = X; break;
+            default: ok = 0; break;
+            }
+            if (!ok) return 0;
+            uint64_t v = dcp_as_bits(r);
+            if (Rt != 15) cpu.r[Rt] = (uint32_t)v;
+            if (Rt2 != 15) cpu.r[Rt2] = (uint32_t)(v >> 32);
+            return 1;
+        }
+        return 0;
+    }
+    /* MRC reads: upper==0xEE10, hw2=Rt<<12|0x400|(opc2<<5)|CRm */
+    if (upper == 0xEE10 && (lower & 0x0F00) == 0x0400) {
+        int Rt = (lower >> 12) & 0xF;
+        int opc2 = (lower >> 5) & 7, crm = lower & 0xF;
+        double X = dcp_as_double(cpu.dcp_x);
+        if (crm == 0 && opc2 == 0) { /* RXVD: always ready */
+            if (Rt != 15) cpu.r[Rt] = 1;
+            return 1;
+        }
+        if (crm == 0 && opc2 == 1) { /* RCMP */
+            uint32_t fl = dcp_cmp_flags(X, dcp_as_double(cpu.dcp_y));
+            if (Rt == 15) cpu.xpsr = (cpu.xpsr & ~0xF0000000u) | fl;
+            else cpu.r[Rt] = fl;
+            return 1;
+        }
+        if (crm == 2 && opc2 <= 5) { /* RDFA..RDFG: float result */
+            if (Rt != 15) cpu.r[Rt] = dcp_float_bits((float)X);
+            return 1;
+        }
+        if (crm == 3 && opc2 <= 1) { /* RDIC/RDUC */
+            uint32_t iv = opc2 ? dcp_d2u(X, cpu.dcp_rmode) : (uint32_t)dcp_d2i(X, cpu.dcp_rmode);
+            if (Rt != 15) cpu.r[Rt] = iv;
+            return 1;
+        }
+        return 0;
+    }
+    /* CDP ops: hw1=0xEE00|(opc1<<4), hw2=0x0400|(opc2<<5)|CRm */
+    if ((upper & 0xFF00) == 0xEE00 && (lower & 0x0F00) == 0x0400) {
+        int opc1 = (upper >> 4) & 0xF;
+        int opc2 = (lower >> 5) & 7, crm = lower & 0xF;
+        if (opc1 == 8 && crm == 0 && opc2 == 2) cpu.dcp_rmode = 0; /* NTDC */
+        else if (opc1 == 8 && crm == 0 && opc2 == 3) cpu.dcp_rmode = 1; /* NRDC */
+        /* ADD0/ADD1/SUB1/SQR0/NORM/NRDF/NRDD/NTDC/NRDC/INIT: no-ops here;
+         * operands already snapshotted, results computed at reads. */
+        return 1;
+    }
+    return 0;
+}
+
+/* DCP group 0x1F (MRC2/MRRC2). Returns 1 if handled, 0 otherwise. */
+static int t32_dcp2(uint32_t pc, uint16_t upper, uint16_t lower) {
+    (void)pc;
+    /* MRC2: upper==0xFE10, hw2=Rt<<12|0x400|(opc2<<5)|CRm */
+    if (upper == 0xFE10 && (lower & 0x0F00) == 0x0400) {
+        int Rt = (lower >> 12) & 0xF;
+        int opc2 = (lower >> 5) & 7, crm = lower & 0xF;
+        if (crm == 0 && opc2 == 1) { /* PCMP: never engaged */
+            if (Rt == 15) cpu.xpsr &= ~FLAG_N;
+            else cpu.r[Rt] = 0;
+            return 1;
+        }
+        return 0;
+    }
+    /* MRRC2: hw1=0xFC50|Rt2, hw2=Rt<<12|0x400|opc1<<4|CRm */
+    if ((upper & 0xFFF0) == 0xFC50 && (lower & 0x0F00) == 0x0400) {
+        int Rt = (lower >> 12) & 0xF, Rt2 = upper & 0xF;
+        int opc1 = (lower >> 4) & 0xF, crm = lower & 0xF;
+        uint64_t v = 0;
+        if (opc1 == 0 && crm == 8) v = cpu.dcp_x;         /* PXMD */
+        else if (opc1 == 0 && crm == 9) v = cpu.dcp_y;    /* PYMD */
+        else if (opc1 == 0 && crm == 10) v = cpu.dcp_ef;  /* PEFD */
+        else return 0;
+        if (Rt != 15) cpu.r[Rt] = (uint32_t)v;
+        if (Rt2 != 15) cpu.r[Rt2] = (uint32_t)(v >> 32);
+        return 1;
+    }
+    return 0;
 }
 
 /* Execute a VFP instruction in group 0x1D (EC/ED/EE/EF uppers).
@@ -1184,6 +1458,9 @@ int thumb32_step(uint32_t pc, uint16_t upper, uint16_t lower) {
     /* Group 11101: E8xx-EFxx                                              */
     /* ------------------------------------------------------------------ */
     if (top5 == 0x1D) {
+        /* DCP double-coprocessorbundle first (MCRR/MRRC/CDP/MRC shapes are
+         * disjoint from VFP's by lower[11:8]: 0x4 vs 0xA/B/F). */
+        if (t32_dcp(pc, upper, lower)) return 1;
         /* VFP single-precision (M33 FPU): real execution via t32_vfp;
          * unrecognized coprocessor shapes stay NOP (previous behavior:
          * the blanket skip below also covered MVE etc.). Without the
@@ -1368,6 +1645,9 @@ int thumb32_step(uint32_t pc, uint16_t upper, uint16_t lower) {
     /* Group 11111: F8xx-FFxx                                              */
     /* ------------------------------------------------------------------ */
     if (top5 == 0x1F) {
+        /* DCP MRC2/MRRC2 first (FE10/FC50 shapes are disjoint from VSEL's
+         * FE+0x0Axx and from misc/ldst by full-pattern match). */
+        if (t32_dcp2(pc, upper, lower)) return 1;
         /* VSEL.F32 (M33 FPU, FE uppers): select on APSR flags. Must
          * precede misc/ldst: as LDR.W it would corrupt memory. */
         if (t32_vsel(pc, upper, lower)) return 1;

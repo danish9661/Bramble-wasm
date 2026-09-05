@@ -14,6 +14,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <stdint.h>
+#include <math.h>
 #include <unistd.h>
 #include <fcntl.h>
 #include <sys/socket.h>
@@ -4159,6 +4160,56 @@ TEST(test_sbc_borrow_carry) {
     PASS();
 }
 
+TEST(test_rrx_f2d_fastpath) {
+    /* pico_double __aeabi_f2d fast path (RAM 0x20003EA4): normal-range
+     * floats convert via ASR + RRX where MOV.W (no S) must preserve the
+     * carry from `lsls r2, r0, #1` into RRX bit31. ROR#0 decoded as
+     * identity left stale/zero high words so every float->double
+     * promotion (printf %.1f) printed garbage (temp read +0.0E+41). */
+    reset_cpu();
+    uint32_t pc = RAM_BASE + 0x1000;
+    const uint16_t prog[] = {
+        0x0042,             /* lsls r2, r0, #1 */
+        0xEA4F,0x01E2,     /* mov.w r1, r2, asr #3 */
+        0xEA4F,0x0131,     /* mov.w r1, r1, rrx */
+        0xEA4F,0x7002,     /* mov.w r0, r2, lsl #28 */
+        0xBF1F,             /* itttt ne */
+        0xF012,0x437F,     /* andsne.w r3, r2, #0xff000000 */
+        0xF093,0x4F7F,     /* teqne r3, #0xff000000 */
+        0xF081,0x5160,     /* eorne.w r1, r1, #0x38000000 */
+        0x4770,             /* bxne lr */
+        0xF032,0x427F,     /* bics.w r2, r2, #0xff000000 (zero path) */
+        0xBF08,             /* it eq */
+        0x4770,             /* bxeq lr */
+        0xBF00,             /* nop (lr landing) */
+    };
+    for (size_t i = 0; i < sizeof(prog) / sizeof(prog[0]); i++)
+        mem_write16(pc + 2 * (uint32_t)i, prog[i]);
+    uint32_t landing = pc + 2 * 19;
+    float cases[] = { 437.2f, 27.0f, -1.5f, 0.0f, -0.0f, 1.0e30f };
+    for (size_t c = 0; c < sizeof(cases) / sizeof(cases[0]); c++) {
+        uint32_t fb;
+        memcpy(&fb, &cases[c], 4);
+        double dd = (double)cases[c];
+        uint64_t dbits;
+        memcpy(&dbits, &dd, 8);
+        cpu.r[0] = fb; cpu.r[1] = 0; cpu.r[2] = 0; cpu.r[3] = 0;
+        cpu.r[14] = landing | 1u;
+        cpu.r[15] = pc;
+        for (int i = 0; i < 14 && !cpu_is_halted(); i++) cpu_step();
+        ASSERT_EQ((uint32_t)dbits, cpu.r[0], "f2d low word");
+        ASSERT_EQ((uint32_t)(dbits >> 32), cpu.r[1], "f2d high word");
+    }
+    /* +Inf takes the same fast path with exp==0xFF (eor skipped). */
+    cpu.r[0] = 0x7F800000u; cpu.r[1] = 0; cpu.r[2] = 0; cpu.r[3] = 0;
+    cpu.r[14] = landing | 1u;
+    cpu.r[15] = pc;
+    for (int i = 0; i < 14 && !cpu_is_halted(); i++) cpu_step();
+    ASSERT_EQ(0u, cpu.r[0], "inf low word");
+    ASSERT_EQ(0x7FF00000u, cpu.r[1], "inf high word");
+    PASS();
+}
+
 /* ========================================================================
  * VFP single-precision Tests (M33 FPU)
  * Encodings verified against arm-none-eabi-as -mcpu=cortex-m33.
@@ -4470,6 +4521,206 @@ TEST(test_vfp_push_pop) {
     ASSERT_EQ(0xBBBBBBBBu, cpu.vfp_s[1], "vldmia s1");
     ASSERT_EQ(0xCCCCCCCCu, cpu.vfp_s[2], "vldmia s2");
     ASSERT_EQ(0xDDDDDDDDu, cpu.vfp_s[3], "vldmia s3");
+    PASS();
+}
+
+/* ========================================================================
+ * DCP double-coprocessor Tests (RP2350)
+ * Encodings verified against arm-none-eabi-as via SDK dcp_instr.inc.S.
+ * Doubles in GP regs are AAPCS (r_lo, r_hi).
+ * ======================================================================== */
+
+static void dcp_write_words(uint32_t pc, const uint16_t *words, int n) {
+    for (int i = 0; i < n; i++) mem_write16(pc + 2 * i, words[i]);
+}
+
+static void dcp_set_d01(double a, double b) {
+    uint64_t ua, ub;
+    memcpy(&ua, &a, 8);
+    memcpy(&ub, &b, 8);
+    cpu.r[0] = (uint32_t)ua;
+    cpu.r[1] = (uint32_t)(ua >> 32);
+    cpu.r[2] = (uint32_t)ub;
+    cpu.r[3] = (uint32_t)(ub >> 32);
+}
+
+static uint64_t dcp_get_d01(void) {
+    return (uint64_t)cpu.r[0] | ((uint64_t)cpu.r[1] << 32);
+}
+
+TEST(test_dcp_add_sub) {
+    /* WXUP/WYUP/ADD0/ADD1/NRDD/RDDA: 1.5+2.5=4.0 (dcp_dadd_m shape). */
+    reset_cpu();
+    uint32_t pc = RAM_BASE + 0x1000;
+    const uint16_t prog[] = {0xEC41,0x0410, 0xEC43,0x2411, 0xEE00,0x0401,
+                             0xEE10,0x0401, 0xEE80,0x0420, 0xEC51,0x0410};
+    dcp_write_words(pc, prog, 12);
+    dcp_set_d01(1.5, 2.5);
+    cpu.r[15] = pc;
+    for (int i = 0; i < 6; i++) cpu_step();
+    uint64_t r = dcp_get_d01();
+    double d;
+    memcpy(&d, &r, 8);
+    ASSERT_TRUE(d == 4.0, "1.5+2.5=4.0 via DCP");
+    /* SUB1 variant: 5.5-2.5=3.0 (dcp_dsub_m shape). */
+    dcp_set_d01(5.5, 2.5);
+    const uint16_t prog2[] = {0xEC41,0x0410, 0xEC43,0x2411, 0xEE00,0x0401,
+                              0xEE10,0x0421, 0xEE80,0x0420, 0xEC51,0x0430};
+    dcp_write_words(pc, prog2, 12);
+    cpu.r[15] = pc;
+    for (int i = 0; i < 6; i++) cpu_step();
+    r = dcp_get_d01();
+    memcpy(&d, &r, 8);
+    ASSERT_TRUE(d == 3.0, "5.5-2.5=3.0 via DCP");
+    PASS();
+}
+
+TEST(test_dcp_mul_div_sqrt) {
+    /* Full canned sequences incl. ignored integer-assist reads/writes:
+     * dmul with RXMS/RYMS/WXMS/WXMO, div with WXDD, sqrt with WXDQ. */
+    reset_cpu();
+    uint32_t pc = RAM_BASE + 0x1000;
+    /* dmul: 1.5*2.0=3.0 */
+    const uint16_t mul[] = {0xEC41,0x0410, 0xEC43,0x2411,
+                            0xEC51,0x0404, 0xEC53,0x2405,
+                            0xEC41,0x0420, 0xEC41,0x0430,
+                            0xEE80,0x0420, 0xEC51,0x0450};
+    dcp_write_words(pc, mul, 16);
+    dcp_set_d01(1.5, 2.0);
+    cpu.r[15] = pc;
+    for (int i = 0; i < 8; i++) cpu_step();
+    uint64_t r = dcp_get_d01();
+    double d;
+    memcpy(&d, &r, 8);
+    ASSERT_TRUE(d == 3.0, "1.5*2.0=3.0 via DCP (intermediates ignored)");
+    /* div: 7.0/2.0=3.5 (WXDD intermediate ignored, originals used) */
+    const uint16_t div[] = {0xEC41,0x0410, 0xEC43,0x2411,
+                            0xEC41,0x0440, 0xEE80,0x0420, 0xEC51,0x0470};
+    dcp_write_words(pc, div, 10);
+    dcp_set_d01(7.0, 2.0);
+    cpu.r[15] = pc;
+    for (int i = 0; i < 5; i++) cpu_step();
+    r = dcp_get_d01();
+    memcpy(&d, &r, 8);
+    ASSERT_TRUE(d == 3.5, "7.0/2.0=3.5 via DCP");
+    /* sqrt(2.0) via WXUP/SQR0/WXDQ/NRDD/RDDQ */
+    const uint16_t sq[] = {0xEC41,0x0410, 0xEE20,0x0401,
+                           0xEC41,0x0450, 0xEE80,0x0420, 0xEC51,0x0490};
+    dcp_write_words(pc, sq, 10);
+    dcp_set_d01(2.0, 0.0);
+    cpu.r[15] = pc;
+    for (int i = 0; i < 5; i++) cpu_step();
+    r = dcp_get_d01();
+    memcpy(&d, &r, 8);
+    ASSERT_TRUE(d == sqrt(2.0), "sqrt(2.0) via DCP");
+    PASS();
+}
+
+TEST(test_dcp_cmp) {
+    /* dcp_dcmp_m shapes: RCMP to reg (Z bit) and to PC (HI，因此). */
+    reset_cpu();
+    uint32_t pc = RAM_BASE + 0x1000;
+    /* RCMP r4 (EE10 4430) after WXUP/WYUP/ADD0, then ubfx #30. Use raw: */
+    const uint16_t cmp[] = {0xEC41,0x0410, 0xEC43,0x2411,
+                            0xEE00,0x0401, 0xEE10,0x4430};
+    dcp_write_words(pc, cmp, 8);
+    dcp_set_d01(1.0, 2.0);
+    cpu.r[15] = pc;
+    for (int i = 0; i < 4; i++) cpu_step();
+    /* LT: N=1,Z=0,C=0,V=0 -> word 0x80000000, Z bit clear */
+    ASSERT_EQ(0x80000000u, cpu.r[4], "1.0<2.0 flags word has N");
+    ASSERT_TRUE(((cpu.r[4] >> 30) & 1u) == 0, "LT clears Z bit");
+    /* RCMP pc (EE10 F430): flags into APSR; EQ -> Z=1,C=1 */
+    const uint16_t cmp2[] = {0xEC41,0x0410, 0xEC43,0x2411,
+                             0xEE00,0x0401, 0xEE10,0xF430};
+    dcp_write_words(pc, cmp2, 8);
+    dcp_set_d01(2.0, 2.0);
+    cpu.xpsr &= ~0xF0000000u;
+    cpu.r[15] = pc;
+    for (int i = 0; i < 4; i++) cpu_step();
+    ASSERT_TRUE((cpu.xpsr & 0x40000000u) != 0, "EQ sets Z via RCMP pc");
+    ASSERT_TRUE((cpu.xpsr & 0x20000000u) != 0, "EQ sets C via RCMP pc");
+    /* NaN -> V=1 (unordered), Z=0,C=0 */
+    uint64_t nanbits = 0x7FF8000000000000ULL;
+    cpu.r[0] = (uint32_t)nanbits;
+    cpu.r[1] = (uint32_t)(nanbits >> 32);
+    cpu.r[2] = 0; cpu.r[3] = 0;
+    cpu.xpsr &= ~0xF0000000u;
+    cpu.r[15] = pc;
+    for (int i = 0; i < 4; i++) cpu_step();
+    ASSERT_EQ(0x10000000u, cpu.xpsr & 0xF0000000u, "NaN sets V only");
+    PASS();
+}
+
+TEST(test_dcp_convert) {
+    /* int2double (WXIC/ADD0/SUB1/NRDD/RDDS returns X, not X-Y). */
+    reset_cpu();
+    uint32_t pc = RAM_BASE + 0x1000;
+    const uint16_t i2d[] = {0xEC44,0x4470, 0xEE00,0x0401, 0xEE10,0x0421,
+                            0xEE80,0x0420, 0xEC51,0x0430};
+    dcp_write_words(pc, i2d, 10);
+    cpu.r[4] = (uint32_t)-123456;
+    cpu.r[15] = pc;
+    for (int i = 0; i < 5; i++) cpu_step();
+    uint64_t r = dcp_get_d01();
+    double d;
+    memcpy(&d, &r, 8);
+    ASSERT_TRUE(d == -123456.0, "int2double(-123456) via DCP");
+    /* double2int (WXDC/ADD0/ADD1/NTDC/RDIC): truncates + saturates. */
+    const uint16_t d2i[] = {0xEC41,0x0480, 0xEE00,0x0401, 0xEE10,0x0401,
+                            0xEE80,0x0440, 0xEE10,0x0413};
+    dcp_write_words(pc, d2i, 10);
+    dcp_set_d01(27.9, 0.0);
+    cpu.r[15] = pc;
+    for (int i = 0; i < 5; i++) cpu_step();
+    ASSERT_EQ(27u, cpu.r[0], "27.9 truncates to 27 via DCP");
+    /* f2d (WXYU/NRDD/RDDG): float bits -> double. */
+    const uint16_t f2d[] = {0xEC4A,0xA412, 0xEE80,0x0420, 0xEC51,0x04B0};
+    dcp_write_words(pc, f2d, 6);
+    cpu.r[10] = 0x3F000000u; /* 0.5f */
+    cpu.r[15] = pc;
+    for (int i = 0; i < 3; i++) cpu_step();
+    r = dcp_get_d01();
+    memcpy(&d, &r, 8);
+    ASSERT_TRUE(d == 0.5, "f2d(0.5f) via DCP");
+    /* d2f (WXUP/NRDF/RDFG). */
+    const uint16_t d2f[] = {0xEC41,0x0410, 0xEE80,0x0422, 0xEE10,0x24B2};
+    dcp_write_words(pc, d2f, 6);
+    dcp_set_d01(0.25, 0.0);
+    cpu.r[15] = pc;
+    for (int i = 0; i < 3; i++) cpu_step();
+    ASSERT_EQ(0x3E800000u, cpu.r[2], "d2f(0.25) via DCP");
+    PASS();
+}
+
+TEST(test_dcp_engage_save) {
+    /* PCMP pc clears N (never engaged); save/restore round-trips X/Y/EF. */
+    reset_cpu();
+    uint32_t pc = RAM_BASE + 0x1000;
+    mem_write16(pc + 0, 0xFE10);
+    mem_write16(pc + 2, 0xF430); /* PCMP pc */
+    cpu.xpsr |= 0xF0000000u;
+    cpu.r[15] = pc;
+    cpu_step();
+    ASSERT_TRUE((cpu.xpsr & 0x80000000u) == 0, "PCMP clears N (idle engine)");
+    /* PXMD/PYMD/REFD read back what WXMD/WYMD/WEFD wrote. */
+    const uint16_t sr[] = {0xEC47,0x6400, 0xEC49,0x8401, 0xEC4B,0xA402,
+                           0xFC51,0x0408, 0xFC53,0x2409, 0xFC55,0x440A};
+    dcp_write_words(pc, sr, 12);
+    cpu.r[6] = 0x11111111u; cpu.r[7] = 0x22222222u;
+    cpu.r[8] = 0x33333333u; cpu.r[9] = 0x44444444u;
+    cpu.r[10] = 0x55555555u; cpu.r[11] = 0x66666666u;
+    cpu.r[15] = pc;
+    for (int i = 0; i < 3; i++) cpu_step();
+    cpu.r[0] = 0; cpu.r[1] = 0; cpu.r[2] = 0;
+    cpu.r[3] = 0; cpu.r[4] = 0; cpu.r[5] = 0;
+    for (int i = 0; i < 3; i++) cpu_step();
+    ASSERT_EQ(0x11111111u, cpu.r[0], "PXMD lo roundtrip");
+    ASSERT_EQ(0x22222222u, cpu.r[1], "PXMD hi roundtrip");
+    ASSERT_EQ(0x33333333u, cpu.r[2], "PYMD lo roundtrip");
+    ASSERT_EQ(0x44444444u, cpu.r[3], "PYMD hi roundtrip");
+    ASSERT_EQ(0x55555555u, cpu.r[4], "PEFD lo roundtrip");
+    ASSERT_EQ(0x66666666u, cpu.r[5], "PEFD hi roundtrip");
     PASS();
 }
 
@@ -5250,14 +5501,16 @@ TEST(test_m33_thumb2_ldrw_pcrel_veneer) {
 }
 
 TEST(test_m33_thumb2_vfp_nop) {
-    /* M33 FPU: EE10 0430 = cfmvrdh lives in the 0x1D group (not 0x1E).
-     * With no FPU it must be a NOP; misdecoded as shifted-register DP
-     * it wrote Rd (here r4) and corrupted littleos_pico2 runtime_init. */
+    /* M33 coprocessor space: unhandled shapes must stay NOP (previous
+     * behavior that kept littleos_pico2's runtime_init alive when the FPU
+     * was unimplemented). NOTE: EE10 0430 (RCMP r0) is *not* used here
+     * anymore: it is a real DCP op now (see test_dcp_cmp) and writes r0.
+     * EE10 0470 (MRC p4, unknown CRm/opc2 combo) still NOPs. */
     reset_cpu();
     cpu.r[0] = 0x12345678;
     cpu.r[4] = 0xDEADBEEF;
     cpu.xpsr &= ~(0x80000000u | 0x40000000u | 0x20000000u | 0x10000000u);
-    thumb32_step(0x10000100, 0xEE10, 0x0430);
+    thumb32_step(0x10000100, 0xEE10, 0x0470);
     ASSERT_EQ(0xDEADBEEF, cpu.r[4], "VFP stub must not write Rd");
     ASSERT_EQ(0x12345678, cpu.r[0], "VFP stub must not touch Rn");
     ASSERT_EQ(0x10000104, cpu.r[15], "VFP stub advances PC by 4");
@@ -6216,6 +6469,7 @@ int main(void) {
     RUN_TEST(test_it_block_no_flag_update);
     RUN_TEST(test_it_block_cmp_updates_flags);
     RUN_TEST(test_sbc_borrow_carry);
+    RUN_TEST(test_rrx_f2d_fastpath);
     RUN_TEST(test_vfp_mov_imm);
     RUN_TEST(test_vfp_vcvt_roundtrip);
     RUN_TEST(test_vfp_arith);
@@ -6224,6 +6478,12 @@ int main(void) {
     RUN_TEST(test_vfp_mov_gp);
     RUN_TEST(test_vfp_vsel);
     RUN_TEST(test_vfp_firmware_percent);
+    RUN_TEST(test_vfp_push_pop);
+    RUN_TEST(test_dcp_add_sub);
+    RUN_TEST(test_dcp_mul_div_sqrt);
+    RUN_TEST(test_dcp_cmp);
+    RUN_TEST(test_dcp_convert);
+    RUN_TEST(test_dcp_engage_save);
     RUN_TEST(test_vfp_push_pop);
     END_CATEGORY("Core Pool / Threading");
 
@@ -6318,6 +6578,14 @@ int main(void) {
     RUN_TEST(test_rv_periph_timer1);
     RUN_TEST(test_rv_hazard3_csrs);
     END_CATEGORY("RP2350 Peripherals");
+
+    BEGIN_CATEGORY("DCP Double Coprocessor");
+    RUN_TEST(test_dcp_add_sub);
+    RUN_TEST(test_dcp_mul_div_sqrt);
+    RUN_TEST(test_dcp_cmp);
+    RUN_TEST(test_dcp_convert);
+    RUN_TEST(test_dcp_engage_save);
+    END_CATEGORY("DCP Double Coprocessor");
 
     printf("\n========================================\n");
     printf(" Results: %d/%d passed, %d failed\n", tests_passed, tests_run, tests_failed);
