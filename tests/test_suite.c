@@ -4210,6 +4210,181 @@ TEST(test_rrx_f2d_fastpath) {
     PASS();
 }
 
+TEST(test_ldrb_reg_ctype) {
+    /* newlib ctype lookup shape from sagelang identifier() (scan_token):
+     * ldrb r7,[r5] / ldrb.w r4,[ip,r7] / ands.w r4,r4,#7 / add.w r5,r5,#1.
+     * A broken LDRB.W-T2 freezes the Sage lexer (zero-advance loop). */
+    reset_cpu();
+    uint32_t pc = RAM_BASE + 0x1000;
+    mem_write16(pc + 0, 0x782F); /* ldrb r7, [r5] */
+    mem_write16(pc + 2, 0xF81C); /* ldrb.w r4, [ip, r7] (hw1) */
+    mem_write16(pc + 4, 0x4007); /* (hw2) */
+    mem_write16(pc + 6, 0xF014); /* ands.w r4, r4, #7 (hw1) */
+    mem_write16(pc + 8, 0x0407); /* (hw2) */
+    mem_write16(pc + 10, 0xF105); /* add.w r5, r5, #1 (hw1) */
+    mem_write16(pc + 12, 0x0501); /* (hw2) */
+    mem_write16(pc + 14, 0xBF00); /* nop */
+    /* Fake ctype table: index = char, value = class bits (_L=2,_N=4). */
+    uint32_t tab = RAM_BASE + 0x2000;
+    mem_write8(tab + 'a', 0x02);
+    mem_write8(tab + '4', 0x04);
+    mem_write8(tab + ' ', 0x08);
+    uint32_t buf = RAM_BASE + 0x2100;
+    mem_write8(buf + 0, 'a');
+    cpu.r[5] = buf;
+    cpu.r[12] = tab; /* ip = table base (already +1 folded) */
+    cpu.r[15] = pc;
+    for (int i = 0; i < 6 && !cpu_is_halted(); i++) cpu_step();
+    ASSERT_EQ(0x02u, cpu.r[4], "table['a']&7 == 2 (alpha)");
+    ASSERT_EQ(buf + 1, cpu.r[5], "pointer advanced");
+    ASSERT_TRUE((cpu.xpsr & 0x40000000u) == 0, "ands #7 nonzero clears Z");
+    /* Digit case. */
+    reset_cpu();
+    mem_write16(pc + 0, 0x782F);
+    mem_write16(pc + 2, 0xF81C);
+    mem_write16(pc + 4, 0x4007);
+    mem_write16(pc + 6, 0xF014);
+    mem_write16(pc + 8, 0x0407);
+    mem_write16(pc + 10, 0xF105);
+    mem_write16(pc + 12, 0x0501);
+    mem_write16(pc + 14, 0xBF00);
+    mem_write8(tab + 'a', 0x02);
+    mem_write8(tab + '4', 0x04);
+    mem_write8(tab + ' ', 0x08);
+    mem_write8(buf + 0, '4');
+    cpu.r[5] = buf;
+    cpu.r[12] = tab;
+    cpu.r[15] = pc;
+    for (int i = 0; i < 6 && !cpu_is_halted(); i++) cpu_step();
+    ASSERT_EQ(0x04u, cpu.r[4], "table['4']&7 == 4 (digit)");
+    PASS();
+}
+
+TEST(test_stmia_w_store) {
+    /* LDM/STM T2 L bit is upper[4] (E8BC load vs E8AC store). The old
+     * bit7 decode ran every STMIA.W as a load: multi-word struct copies
+     * (Sage 28-byte Tokens) never stored, freezing the Sage lexer. */
+    reset_cpu();
+    uint32_t pc = RAM_BASE + 0x1000;
+    uint32_t src = RAM_BASE + 0x2000, dst = RAM_BASE + 0x2100;
+    mem_write32(src + 0, 0x11111111u);
+    mem_write32(src + 4, 0x22222222u);
+    mem_write32(src + 8, 0x33333333u);
+    mem_write32(src + 12, 0x44444444u);
+    mem_write32(src + 16, 0x55555555u);
+    mem_write32(src + 20, 0x66666666u);
+    mem_write32(src + 24, 0x77777777u);
+    /* ldmia.w r4!, {r0-r3} / stmia.w r5!, {r0-r3} /
+     * ldmia.w r4, {r0-r2} / stmia.w r5, {r0-r2} (parse-loop shapes). */
+    mem_write16(pc + 0, 0xE8B4); mem_write16(pc + 2, 0x000F);
+    mem_write16(pc + 4, 0xE8A5); mem_write16(pc + 6, 0x000F);
+    mem_write16(pc + 8, 0xE894); mem_write16(pc + 10, 0x0007);
+    mem_write16(pc + 12, 0xE885); mem_write16(pc + 14, 0x0007);
+    mem_write16(pc + 16, 0xBF00);
+    cpu.r[4] = src; cpu.r[5] = dst;
+    cpu.r[0] = cpu.r[1] = cpu.r[2] = cpu.r[3] = 0;
+    cpu.r[15] = pc;
+    for (int i = 0; i < 6 && !cpu_is_halted(); i++) cpu_step();
+    ASSERT_EQ(0x11111111u, mem_read32(dst + 0), "word0 stored");
+    ASSERT_EQ(0x22222222u, mem_read32(dst + 4), "word1 stored");
+    ASSERT_EQ(0x33333333u, mem_read32(dst + 8), "word2 stored");
+    ASSERT_EQ(0x44444444u, mem_read32(dst + 12), "word3 stored");
+    ASSERT_EQ(0x55555555u, mem_read32(dst + 16), "word4 stored");
+    ASSERT_EQ(0x66666666u, mem_read32(dst + 20), "word5 stored");
+    ASSERT_EQ(0x77777777u, mem_read32(dst + 24), "word6 stored");
+    ASSERT_EQ(src + 16, cpu.r[4], "ldm writeback");
+    ASSERT_EQ(dst + 16, cpu.r[5], "stm writeback");
+    PASS();
+}
+
+TEST(test_usat_ssat) {
+    /* USAT/SSAT T1 (pico_double double2fix64_z uses `usat r2, #5, r2`;
+     * unhandled -> HardFault on Sage print of integral floats). */
+    reset_cpu();
+    uint32_t pc = RAM_BASE + 0x1000;
+    /* usat r2, #5, r2 */
+    mem_write16(pc + 0, 0xF382); mem_write16(pc + 2, 0x0205);
+    mem_write16(pc + 4, 0xBF00);
+    cpu.r[2] = (uint32_t)-1;
+    cpu.xpsr &= ~(1u << 27);
+    cpu.r[15] = pc;
+    for (int i = 0; i < 2 && !cpu_is_halted(); i++) cpu_step();
+    ASSERT_EQ(0u, cpu.r[2], "usat(-1) saturates to 0");
+    ASSERT_TRUE((cpu.xpsr & (1u << 27)) != 0, "Q set on saturation");
+    reset_cpu();
+    mem_write16(pc + 0, 0xF382); mem_write16(pc + 2, 0x0205);
+    mem_write16(pc + 4, 0xBF00);
+    cpu.r[2] = 100;
+    cpu.xpsr &= ~(1u << 27);
+    cpu.r[15] = pc;
+    for (int i = 0; i < 2 && !cpu_is_halted(); i++) cpu_step();
+    ASSERT_EQ(31u, cpu.r[2], "usat(100,#5) saturates to 31");
+    reset_cpu();
+    mem_write16(pc + 0, 0xF382); mem_write16(pc + 2, 0x0205);
+    mem_write16(pc + 4, 0xBF00);
+    cpu.r[2] = 20;
+    cpu.xpsr &= ~(1u << 27);
+    cpu.r[15] = pc;
+    for (int i = 0; i < 2 && !cpu_is_halted(); i++) cpu_step();
+    ASSERT_EQ(20u, cpu.r[2], "usat(20,#5) passes through");
+    ASSERT_TRUE((cpu.xpsr & (1u << 27)) == 0, "Q clear without saturation");
+    /* ssat r2, #5, r2 */
+    reset_cpu();
+    mem_write16(pc + 0, 0xF302); mem_write16(pc + 2, 0x0204);
+    mem_write16(pc + 4, 0xBF00);
+    cpu.r[2] = 100;
+    cpu.r[15] = pc;
+    for (int i = 0; i < 2 && !cpu_is_halted(); i++) cpu_step();
+    ASSERT_EQ(15u, cpu.r[2], "ssat(100,#5) saturates to 15");
+    reset_cpu();
+    mem_write16(pc + 0, 0xF302); mem_write16(pc + 2, 0x0204);
+    mem_write16(pc + 4, 0xBF00);
+    cpu.r[2] = (uint32_t)-100;
+    cpu.r[15] = pc;
+    for (int i = 0; i < 2 && !cpu_is_halted(); i++) cpu_step();
+    ASSERT_EQ((uint32_t)-16, cpu.r[2], "ssat(-100,#5) saturates to -16");
+    /* usat r0, #1, r7, lsl #3 */
+    reset_cpu();
+    mem_write16(pc + 0, 0xF387); mem_write16(pc + 2, 0x00C1);
+    mem_write16(pc + 4, 0xBF00);
+    cpu.r[7] = 1;
+    cpu.r[15] = pc;
+    for (int i = 0; i < 2 && !cpu_is_halted(); i++) cpu_step();
+    ASSERT_EQ(1u, cpu.r[0], "usat(1<<3,#1) saturates to 1");
+    PASS();
+}
+
+TEST(test_smmulr_smmlar) {
+    /* Signed 64->32 high multiply (pico_double ddiv iteration needs
+     * these; previously fell into LDR.W-T2 and loaded garbage). */
+    reset_cpu();
+    uint32_t pc = RAM_BASE + 0x1000;
+    /* smmulr r2, r2, r2 (FB52 F212) */
+    mem_write16(pc + 0, 0xFB52); mem_write16(pc + 2, 0xF212);
+    mem_write16(pc + 4, 0xBF00);
+    cpu.r[2] = 0x40000000u; /* 0.5 in Q31 */
+    cpu.r[15] = pc;
+    for (int i = 0; i < 2 && !cpu_is_halted(); i++) cpu_step();
+    ASSERT_EQ(0x10000000u, cpu.r[2], "smmulr(0.5*0.5) rounds to 0.25>>32");
+    /* smmlar r0, r2, r0, r0 (FB52 0010): hi + Ra */
+    reset_cpu();
+    mem_write16(pc + 0, 0xFB52); mem_write16(pc + 2, 0x0010);
+    mem_write16(pc + 4, 0xBF00);
+    cpu.r[2] = 0x40000000u; cpu.r[0] = 0x00000001u;
+    cpu.r[15] = pc;
+    for (int i = 0; i < 2 && !cpu_is_halted(); i++) cpu_step();
+    ASSERT_EQ(0x00000001u, cpu.r[0], "smmlar(0.5*1>>32)+1 == 1");
+    /* smmlsr r3, r4, r5, r6 (FB64 6315) */
+    reset_cpu();
+    mem_write16(pc + 0, 0xFB64); mem_write16(pc + 2, 0x6315);
+    mem_write16(pc + 4, 0xBF00);
+    cpu.r[4] = 0x40000000u; cpu.r[5] = 0x40000000u; cpu.r[6] = 0x10000000u;
+    cpu.r[15] = pc;
+    for (int i = 0; i < 2 && !cpu_is_halted(); i++) cpu_step();
+    ASSERT_EQ(0x00000000u, cpu.r[3], "smmlsr(0.25>>32)-0x10000000 == 0");
+    PASS();
+}
+
 /* ========================================================================
  * VFP single-precision Tests (M33 FPU)
  * Encodings verified against arm-none-eabi-as -mcpu=cortex-m33.
@@ -6470,6 +6645,10 @@ int main(void) {
     RUN_TEST(test_it_block_cmp_updates_flags);
     RUN_TEST(test_sbc_borrow_carry);
     RUN_TEST(test_rrx_f2d_fastpath);
+    RUN_TEST(test_ldrb_reg_ctype);
+    RUN_TEST(test_stmia_w_store);
+    RUN_TEST(test_usat_ssat);
+    RUN_TEST(test_smmulr_smmlar);
     RUN_TEST(test_vfp_mov_imm);
     RUN_TEST(test_vfp_vcvt_roundtrip);
     RUN_TEST(test_vfp_arith);

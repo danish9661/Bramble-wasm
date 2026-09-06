@@ -236,7 +236,7 @@ static void t32_bl(uint32_t pc, uint16_t upper, uint16_t lower) {
 static void t32_ldst_multiple(uint32_t pc, uint16_t upper, uint16_t lower) {
     (void)pc;
     int is_db = (upper >> 8) & 1;
-    int L     = (upper >> 7) & 1;
+    int L     = (upper >> 4) & 1; /* bit4: 1=LDM, 0=STM (E8BC vs E8AC) */
     int W     = (upper >> 5) & 1;
     int Rn    = upper & 0xF;
 
@@ -588,6 +588,55 @@ static int t32_misc(uint32_t pc, uint16_t upper, uint16_t lower) {
         cpu.r[RdHi] = (uint32_t)((uint64_t)result >> 32);
         return 1;
     }
+    /* SMMULR/SMMLAR/SMMUL/SMMLA T1: upper = 1111 1011 0101 Rn,
+     * lower = Ra Rd op2 Rm (op2: 0001 round, 0000 truncate; Ra=15 means
+     * no accumulate). Pico_double ddiv/dsqrt iteration needs these;
+     * previously fell into LDR.W-T2 and silently loaded garbage.
+     * Encodings verified against arm-none-eabi-as -mcpu=cortex-m33. */
+    if ((upper & 0xFFF0) == 0xFB50 && ((lower & 0x00F0) == 0x0010 ||
+                                       (lower & 0x00F0) == 0x0000)) {
+        int Rn = upper & 0xF;
+        int Ra = (lower >> 12) & 0xF;
+        int Rd = (lower >> 8) & 0xF;
+        int Rm = lower & 0xF;
+        int round = ((lower >> 4) & 1) != 0; /* op2 bit0: 1 round, 0 trunc */
+        int64_t prod = (int64_t)(int32_t)cpu.r[Rn] * (int64_t)(int32_t)cpu.r[Rm];
+        uint32_t hi = (uint32_t)(prod >> 32);
+        if (Rd != 15) {
+            if (round) {
+                uint32_t rounded = (uint32_t)(((uint64_t)prod + 0x80000000ULL) >> 32);
+                cpu.r[Rd] = (Ra == 15) ? rounded : rounded + cpu.r[Ra];
+            } else {
+                cpu.r[Rd] = (Ra == 15) ? hi : hi + cpu.r[Ra];
+            }
+        }
+        return 1;
+    }
+    /* SMUAD/SMUSD T1: upper = 1111 1011 0110 Rn, lower = 1111 Rd 000M Rm. */
+    if ((upper & 0xFFF0) == 0xFB60 && (lower & 0xF0E0) == 0xF000) {
+        int op = (lower >> 4) & 1; /* 0=UAD, 1=USD */
+        int Rn = upper & 0xF;
+        int Rd = (lower >> 8) & 0xF;
+        int Rm = lower & 0xF;
+        int32_t a = (int32_t)cpu.r[Rn], b = (int32_t)cpu.r[Rm];
+        int32_t p1 = (int16_t)(a & 0xFFFF) * (int16_t)(b & 0xFFFF);
+        int32_t p2 = (int16_t)((a >> 16) & 0xFFFF) * (int16_t)((b >> 16) & 0xFFFF);
+        if (Rd != 15) cpu.r[Rd] = (uint32_t)(op ? (p1 - p2) : (p1 + p2));
+        return 1;
+    }
+    /* SMMLSR T1: upper = 1111 1011 0110 Rn, lower = Ra Rd 0001 Rm
+     * (Ra==15 would be SMUSD, handled above). */
+    if ((upper & 0xFFF0) == 0xFB60 && (lower & 0x00F0) == 0x0010 &&
+        ((lower >> 12) & 0xF) != 15) {
+        int Rn = upper & 0xF;
+        int Ra = (lower >> 12) & 0xF;
+        int Rd = (lower >> 8) & 0xF;
+        int Rm = lower & 0xF;
+        int64_t prod = (int64_t)(int32_t)cpu.r[Rn] * (int64_t)(int32_t)cpu.r[Rm];
+        uint32_t hi = (uint32_t)(prod >> 32);
+        if (Rd != 15) cpu.r[Rd] = hi - cpu.r[Ra];
+        return 1;
+    }
     /* CLZ T1: upper = 1111 1010 1011 Rm, lower = 1111 Rd 1000 Rm.
      * The mask must exclude the variable Rd field (0xF0F0, not 0xF0FF),
      * or any nonzero Rd (e.g. clz r3, r2 in littleos_pico2 division)
@@ -628,6 +677,44 @@ static int t32_misc(uint32_t pc, uint16_t upper, uint16_t lower) {
         /* Sign-extend from bit widthm1 */
         if (extracted >> widthm1) extracted |= ~((1u << (widthm1 + 1)) - 1);
         cpu.r[Rd] = extracted;
+        return 1;
+    }
+    /* USAT/SSAT T1: upper = 1111 0011 U0 sh Rm (U=1 USAT F38x,
+     * U=0 SSAT F30x-F33x), lower = imm3 Rd imm2 sat[4:0].
+     * shift: sh=0 LSL amount, sh=1 ASR amount (0 means 32).
+     * sat field is 0-31 for USAT, 1-32 for SSAT. Encodings verified
+     * against arm-none-eabi-as -mcpu=cortex-m33. Was unhandled ->
+     * HardFault in pico_double double2fix64_z (Sage print of floats). */
+    if (((upper & 0xFFC0) == 0xF300 || (upper & 0xFFC0) == 0xF380) &&
+        (lower & 0x8000) == 0x0000) {
+        int is_usat = (upper >> 7) & 1;
+        int sh      = (upper >> 5) & 1;
+        int Rm      = upper & 0xF;
+        int Rd      = (lower >> 8) & 0xF;
+        int amount  = (((lower >> 12) & 7) << 2) | ((lower >> 6) & 3);
+        int sat     = lower & 0x1F;
+        uint32_t v  = cpu.r[Rm];
+        int32_t s;
+        if (sh) s = (amount == 0) ? ((v & 0x80000000u) ? -1 : 0)
+                                  : (int32_t)v >> amount;
+        else    s = (int32_t)(amount ? (v << amount) : v);
+        int satn = is_usat ? sat : sat + 1;
+        int32_t res;
+        int q = 0;
+        if (is_usat) {
+            uint32_t hi = (satn >= 32) ? 0xFFFFFFFFu : ((1u << satn) - 1);
+            if (s < 0) { res = 0; q = 1; }
+            else if ((uint32_t)s > hi) { res = (int32_t)hi; q = 1; }
+            else res = s;
+        } else {
+            int32_t lo = (satn >= 32) ? (int32_t)0x80000000 : -(int32_t)(1u << (satn - 1));
+            int32_t hi = (satn >= 32) ? (int32_t)0x7FFFFFFF : (int32_t)((1u << (satn - 1)) - 1);
+            if (s < lo) { res = lo; q = 1; }
+            else if (s > hi) { res = hi; q = 1; }
+            else res = s;
+        }
+        if (Rd != 15) cpu.r[Rd] = (uint32_t)res;
+        if (q) cpu.xpsr |= (1u << 27); /* Q sticky saturation flag */
         return 1;
     }
     /* BFI T1 / BFC T1: upper = 1111 0011 0110 Rn, lower = 0 imm3 Rd imm2 0 msbit */
