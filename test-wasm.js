@@ -6,7 +6,7 @@ import { execSync } from 'child_process';
 
 const mod = await BrambleModule({ print: () => {}, printErr: () => {} });
 
-// 1) Native reference (must be 325/325)
+// 1) Native reference (must be 377/377)
 try {
   const out = execSync('ctest --test-dir build --output-on-failure 2>&1 | tail -n 5', { encoding: 'utf8' });
   console.log('[native]', out.trim().split('\n').pop());
@@ -16,7 +16,7 @@ try {
 }
 
 // 2) WASM smoke across archs (mirrors Playwright log-not-error + UART checks)
-async function wasmBoot(name, arch, steps, expectSub) {
+async function wasmBoot(name, arch, steps, expectSub, drainCap = 4000) {
   mod._bramble_init(arch);
   mod._bramble_set_clock(125);
   const uf2 = new Uint8Array(fs.readFileSync('./web/' + name));
@@ -27,7 +27,7 @@ async function wasmBoot(name, arch, steps, expectSub) {
   mod._bramble_reset();
   const s = mod._bramble_step(steps);
   let out = '', ch, n = 0;
-  while ((ch = mod._bramble_read_uart(0)) !== -1 && n++ < 4000) out += String.fromCharCode(ch);
+  while ((ch = mod._bramble_read_uart(0)) !== -1 && n++ < drainCap) out += String.fromCharCode(ch);
   const ok = expectSub ? out.includes(expectSub) : true;
   console.log(`[wasm] ${name} blocks=${b} steps=${s} halted=${mod._bramble_is_halted()} uart=${JSON.stringify(out.slice(0, 80))} ${ok ? 'PASS' : 'FAIL'}`);
   if (!ok) process.exitCode = 1;
@@ -38,7 +38,7 @@ await wasmBoot('gpio_test.uf2', 0, 200000, 'LED ON');
 await wasmBoot('timer_test.uf2', 0, 200000, 'Timer Test Complete');
 // TinyUSB CDC via Pico SDK (user-IRQ pump + multi-packet IN needs full enum)
 await wasmBoot('hello_usb.uf2', 0, 3000000, 'Hello, world!');
-await wasmBoot('littleos_pico2.uf2', 2, 200000, '');
+await wasmBoot('littleos_pico2.uf2', 2, 8000000, 'root@littleos', 150000);
 await wasmBoot('littleos_pico2_riscv.uf2', 1, 200000, '');
 
 // 3) MicroPython USB-CDC REPL (bundled v1.22.1 UF2): banner + eval 6*7==42.

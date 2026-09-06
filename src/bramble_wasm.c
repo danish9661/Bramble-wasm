@@ -147,6 +147,20 @@ int bramble_init(int arch) {
     } else {
         membus_rp2350_mode = (arch == ARCH_M33) ? 1 : 0;
         gdb_is_riscv = 0;
+        /* M33 overlay (mirrors main.c): without the 520KB SRAM, RP2350
+         * peripherals and ROM patch, RP2350 firmware dies instantly with
+         * zero output (SP=0x20082000 is outside the default 264KB). */
+        if (arch == ARCH_M33) {
+            m33_init_overlay();
+            rom_patch_rp2350_arm();
+            static uint8_t wasm_m33_sram[520 * 1024];
+            memset(wasm_m33_sram, 0, sizeof(wasm_m33_sram));
+            rp2350_sram_ptr = wasm_m33_sram;
+            mem_set_ram_ptr(wasm_m33_sram, 0x20000000, 520 * 1024);
+            static rp2350_periph_state_t wasm_m33_periph;
+            rp2350_periph_init(&wasm_m33_periph, 1);
+            membus_rp2350_periph = &wasm_m33_periph;
+        }
     }
 
     uart_tx_head = 0;

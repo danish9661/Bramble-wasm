@@ -1738,7 +1738,11 @@ void cpu_unbind_core_context(int core_id, const cpu_bind_context_t *ctx) {
     cpu.it_pos = ctx->it_pos;
     cpu.it_len = ctx->it_len;
 
-    mem_set_ram_ptr(cpu.ram, RAM_BASE, RAM_SIZE);
+    if (membus_rp2350_mode && rp2350_sram_ptr) {
+        mem_set_ram_ptr(rp2350_sram_ptr, 0x20000000, 520 * 1024);
+    } else {
+        mem_set_ram_ptr(cpu.ram, RAM_BASE, RAM_SIZE);
+    }
     /* Preserve the old cpu_step_core() behavior: after a core runs, the
      * active-core routing remains on that core for subsequent NVIC/SIO work. */
     set_active_core(core_id);
@@ -1778,7 +1782,11 @@ void cpu_step_core(int core_id) {
     cpu.it_pos = cores[core_id].it_pos;
     cpu.it_len = cores[core_id].it_len;
 
-    mem_set_ram_ptr(cpu.ram, RAM_BASE, RAM_SIZE);
+    if (membus_rp2350_mode && rp2350_sram_ptr) {
+        mem_set_ram_ptr(rp2350_sram_ptr, 0x20000000, 520 * 1024);
+    } else {
+        mem_set_ram_ptr(cpu.ram, RAM_BASE, RAM_SIZE);
+    }
     set_active_core(core_id);
 
     cpu_step();
@@ -1814,7 +1822,11 @@ void cpu_step_core(int core_id) {
     cpu.it_mask = (saved_it >> 4) & 0xF;
     cpu.it_pos = (saved_it >> 8) & 0xF;
     cpu.it_len = (saved_it >> 12) & 0xF;
-    mem_set_ram_ptr(cpu.ram, RAM_BASE, RAM_SIZE);
+    if (membus_rp2350_mode && rp2350_sram_ptr) {
+        mem_set_ram_ptr(rp2350_sram_ptr, 0x20000000, 520 * 1024);
+    } else {
+        mem_set_ram_ptr(cpu.ram, RAM_BASE, RAM_SIZE);
+    }
 }
 
 void dual_core_step(void) {
