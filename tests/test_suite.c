@@ -4385,11 +4385,6 @@ TEST(test_smmulr_smmlar) {
     PASS();
 }
 
-/* ========================================================================
- * VFP single-precision Tests (M33 FPU)
- * Encodings verified against arm-none-eabi-as -mcpu=cortex-m33.
- * ======================================================================== */
-
 TEST(test_vfp_mov_imm) {
     /* vmov.f32 s14, #27.0 (EEB3 7A0B) must produce 0x41D80000, not NOP. */
     reset_cpu();

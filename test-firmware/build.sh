@@ -81,6 +81,57 @@ echo "✓ Build complete: interrupt_test.uf2"
 
 ;;
 
+clocks|clocks_test)
+
+echo "[1/3] Compiling clocks_test.S..."
+arm-none-eabi-gcc -mcpu=cortex-m0plus -mthumb -c ../clocks_test.S -o clocks_test.o
+
+echo "[2/3] Linking..."
+arm-none-eabi-ld -T ../linker.ld clocks_test.o -o clocks_test.elf
+
+echo "[3/3] Converting to UF2..."
+arm-none-eabi-objcopy -O binary clocks_test.elf clocks_test.bin
+
+python3 ../uf2conv.py clocks_test.bin -o ../../clocks_test.uf2 -b 0x10000100 -f 0xE48BFF56
+
+echo "✓ Build complete: clocks_test.uf2"
+
+;;
+
+psm|psm_test)
+
+echo "[1/3] Compiling psm_test.S..."
+arm-none-eabi-gcc -mcpu=cortex-m0plus -mthumb -c ../psm_test.S -o psm_test.o
+
+echo "[2/3] Linking..."
+arm-none-eabi-ld -T ../linker.ld psm_test.o -o psm_test.elf
+
+echo "[3/3] Converting to UF2..."
+arm-none-eabi-objcopy -O binary psm_test.elf psm_test.bin
+
+python3 ../uf2conv.py psm_test.bin -o ../../psm_test.uf2 -b 0x10000100 -f 0xE48BFF56
+
+echo "✓ Build complete: psm_test.uf2"
+
+;;
+
+fp|fp_test)
+
+echo "[1/3] Compiling fp_test.S..."
+arm-none-eabi-gcc -mcpu=cortex-m0plus -mthumb -c ../fp_test.S -o fp_test.o
+
+echo "[2/3] Linking (libgcc for softfloat __aeabi_dadd)..."
+arm-none-eabi-gcc -mcpu=cortex-m0plus -mthumb -nostartfiles -T ../linker.ld fp_test.o -lgcc -o fp_test.elf
+
+echo "[3/3] Converting to UF2..."
+arm-none-eabi-objcopy -O binary fp_test.elf fp_test.bin
+
+python3 ../uf2conv.py fp_test.bin -o ../../fp_test.uf2 -b 0x10000100 -f 0xE48BFF56
+
+echo "✓ Build complete: fp_test.uf2"
+
+;;
+
 name_prompt|prompt|name)
 
 echo "[1/3] Compiling name_prompt.S..."
@@ -142,9 +193,33 @@ arm-none-eabi-objcopy -O binary name_prompt.elf name_prompt.bin
 python3 ../uf2conv.py name_prompt.bin -o ../../name_prompt.uf2 -b 0x10000100 -f 0xE48BFF56
 echo " ✓ name_prompt.uf2"
 
+# Clocks register readout test
+echo " - Building clocks_test.uf2..."
+arm-none-eabi-gcc -mcpu=cortex-m0plus -mthumb -c ../clocks_test.S -o clocks_test.o
+arm-none-eabi-ld -T ../linker.ld clocks_test.o -o clocks_test.elf
+arm-none-eabi-objcopy -O binary clocks_test.elf clocks_test.bin
+python3 ../uf2conv.py clocks_test.bin -o ../../clocks_test.uf2 -b 0x10000100 -f 0xE48BFF56
+echo " ✓ clocks_test.uf2"
+
+# PSM register readout test
+echo " - Building psm_test.uf2..."
+arm-none-eabi-gcc -mcpu=cortex-m0plus -mthumb -c ../psm_test.S -o psm_test.o
+arm-none-eabi-ld -T ../linker.ld psm_test.o -o psm_test.elf
+arm-none-eabi-objcopy -O binary psm_test.elf psm_test.bin
+python3 ../uf2conv.py psm_test.bin -o ../../psm_test.uf2 -b 0x10000100 -f 0xE48BFF56
+echo " ✓ psm_test.uf2"
+
+# Softfloat double test (0.1 + 0.2 via libgcc __aeabi_dadd)
+echo " - Building fp_test.uf2..."
+arm-none-eabi-gcc -mcpu=cortex-m0plus -mthumb -c ../fp_test.S -o fp_test.o
+arm-none-eabi-gcc -mcpu=cortex-m0plus -mthumb -nostartfiles -T ../linker.ld fp_test.o -lgcc -o fp_test.elf
+arm-none-eabi-objcopy -O binary fp_test.elf fp_test.bin
+python3 ../uf2conv.py fp_test.bin -o ../../fp_test.uf2 -b 0x10000100 -f 0xE48BFF56
+echo " ✓ fp_test.uf2"
+
 echo ""
 
-echo "✓ All firmware built successfully (5/5)"
+echo "✓ All firmware built successfully (8/8)"
 
 ;;
 
@@ -158,6 +233,9 @@ echo " gpio - Build GPIO test"
 echo " timer - Build timer test"
 echo " interrupt - Build timer interrupt test (full flow)"
 echo " name_prompt - Build interactive UART stdin test"
+echo " clocks - Build clocks register readout test"
+echo " psm - Build PSM register readout test"
+echo " fp - Build softfloat double (0.1+0.2) test"
 echo " all - Build all tests"
 echo ""
 
