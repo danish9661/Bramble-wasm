@@ -1584,8 +1584,10 @@ typedef struct {
 static core1_bootrom_state_t core1_bootrom = {0};
 
 void dual_core_init(void) {
-    /* Reset runtime core count — firmware must re-launch Core 1 */
-    num_active_cores = 1;
+    /* Reset core states; firmware (re-)launches Core 1 through the FIFO
+     * protocol. NOTE: num_active_cores is the user's -cores setting (host
+     * thread count), NOT firmware state — resetting it here silently
+     * discarded -cores 2 (emulated cores stayed 1). Preserve it. */
     active_core = CORE0;
 
     /* Initialize core structures */
