@@ -1583,6 +1583,9 @@ typedef struct {
 
 static core1_bootrom_state_t core1_bootrom = {0};
 
+/* Guest-time of the last bootrom readiness push (see below). */
+static uint64_t bootrom_last_push_us = 0;
+
 void dual_core_init(void) {
     /* Reset core states; firmware (re-)launches Core 1 through the FIFO
      * protocol. NOTE: num_active_cores is the user's -cores setting (host
@@ -2125,6 +2128,7 @@ void sio_set_core1_reset(int assert_reset) {
         core1_bootrom.launch_count = 0;
         memset(&fifo[CORE1], 0, sizeof(fifo[CORE1]));
         fifo_try_push(CORE0, 0);
+        bootrom_last_push_us = timer_state.time_us;
     }
 }
 
@@ -2168,6 +2172,21 @@ int sio_core1_bootrom_handle_fifo_write(uint32_t val) {
     }
 
     return 1;
+}
+
+/* Bootrom readiness re-announce: real boot ROM keeps announcing while
+ * core1 waits for launch; our single synchronous push gets drained by SDK
+ * reset itself, leaving later readiness checks (littleOS supervisor:
+ * reset, sleep 10ms, check VLD) empty -> single-core fallback. Re-push
+ * if core0's queue ran dry and >1ms passed: fast drain loops (launch
+ * handshake, microseconds apart) never trip the gate. */
+void sio_bootrom_poll(void) {
+    if (!core1_bootrom.waiting_for_launch) return;
+    if (fifo[CORE0].count != 0) return;
+    uint64_t now = timer_state.time_us;
+    if (now - bootrom_last_push_us < 1000) return;
+    if (fifo_try_push(CORE0, 0))
+        bootrom_last_push_us = now;
 }
 
 /* ========================================================================

@@ -1026,6 +1026,7 @@ static uint32_t sio_read32(uint32_t offset) {
     case SIO_CPUID_OFFSET:
         return (uint32_t)core_id;
     case SIO_FIFO_ST_OFFSET:
+        sio_bootrom_poll();
         return sio_fifo_status(core_id);
     case SIO_FIFO_RD_OFFSET:
         if (!fifo_try_pop(core_id, &val)) {

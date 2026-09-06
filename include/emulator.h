@@ -378,6 +378,7 @@ uint32_t sio_get_core_id(void);
 void sio_set_core1_reset(int assert_reset);
 void sio_set_core1_stall(int stall);
 int sio_core1_bootrom_handle_fifo_write(uint32_t val);
+void sio_bootrom_poll(void);
 
 /* Boot2 detection */
 int cpu_has_boot2(void);

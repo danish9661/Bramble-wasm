@@ -442,6 +442,45 @@ TEST(test_rsbs_zero) {
  * Dual-Core Memory Tests
  * ======================================================================== */
 
+TEST(test_sio_bootrom_replenish_launch) {
+    /* SDK reset drains our synchronous sentinel push; real boot ROM keeps
+     * announcing while core1 waits, so a later readiness check (littleOS
+     * supervisor: reset, sleep 10ms, check VLD) must still see VLD, else
+     * it falls back to single-core. Then the 6-word launch handshake
+     * must unhalt core1 with vtor/SP/PC installed. */
+    reset_cpu();
+    dual_core_init();
+    timer_init();
+    set_active_core(0);
+    sio_set_core1_reset(1);
+    sio_set_core1_reset(0);
+    /* SDK drain (mirrors multicore_reset_core1's pop_blocking). */
+    uint32_t v = 0xDEAD;
+    ASSERT_TRUE(fifo_try_pop(0, &v), "sentinel present right after reset");
+    ASSERT_EQ(0u, v, "sentinel value is 0");
+    /* Supervisor sleep 10ms elapses with no launch yet: re-announce. */
+    timer_tick(2000);
+    uint32_t st = mem_read32(SIO_BASE + 0x50);
+    ASSERT_TRUE(st & 1u, "VLD re-announced after 2ms idle");
+    ASSERT_TRUE(fifo_try_pop(0, &v) && v == 0, "replenished sentinel is 0");
+    /* Immediate re-check must not re-push (1ms gate: launch handshake
+     * drains microsecond-fast and must terminate). */
+    st = mem_read32(SIO_BASE + 0x50);
+    ASSERT_TRUE(!(st & 1u), "no instant re-push inside gate window");
+    /* Full SDK launch handshake: {0,0,1,vtor,sp,entry}. */
+    const uint32_t words[6] = {0, 0, 1, 0x10000100u, 0x20081F00u, 0x10001235u};
+    for (int i = 0; i < 6; i++)
+        mem_write32(SIO_BASE + 0x54, words[i]);
+    ASSERT_TRUE(!cores[1].is_halted, "core1 unhalted after handshake");
+    ASSERT_EQ(0x10000100u, cores[1].vtor, "core1 VTOR installed");
+    ASSERT_EQ(0x20081F00u, cores[1].r[13], "core1 SP installed");
+    ASSERT_EQ(0x10001234u, cores[1].r[15], "core1 PC installed (thumb cleared)");
+    /* Cleanup: re-halt core1, drain echoes, leave globals as found. */
+    sio_set_core1_reset(1);
+    while (fifo_try_pop(0, &v)) { }
+    PASS();
+}
+
 TEST(test_mem_set_ram_ptr_routing) {
     reset_cpu();
     mem_write32(RAM_BASE, 0xDEADBEEF);
@@ -6249,6 +6288,7 @@ int main(void) {
     END_CATEGORY("ADCS/SBCS/RSBS");
 
     BEGIN_CATEGORY("Dual-Core Memory");
+    RUN_TEST(test_sio_bootrom_replenish_launch);
     RUN_TEST(test_mem_set_ram_ptr_routing);
     RUN_TEST(test_dual_core_ram_isolation);
     RUN_TEST(test_dual_core_shared_flash);
