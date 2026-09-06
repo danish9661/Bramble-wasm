@@ -2,7 +2,7 @@
 
 **Date:** 2026-09-06
 **Repo:** `danish9661/Bramble-wasm` (fork of `Night-Traders-Dev/Bramble` MIT)
-**Current version:** `v0.50.0` (tag pushed), `377/377` tests passing
+**Current version:** `v0.50.0` + 5 commits (M33 dual-core live), `378/378` tests passing
 **This session model:** `opencode/muse-spark-1.3-contributor-free`
 **Goal of this file:** Let a new session resume without the huge turn history that causes `invalid_request_error`. Paste this file as context in the new session.
 
@@ -23,7 +23,7 @@ Peripherals: GPIO, UART PL011, SPI PL022, I2C, Timer, PWM, ADC, DMA 12ch, PIO 2+
 
 ## 2. What We Were Doing
 
-Port the native emulator to the browser at ~17-24 MIPS (vs native 85.9/147.6 MIPS, vs c1570/rp2040js ~70M cycles/s) and close all `native ↔ WASM` gaps so the same firmware and tests pass in both.
+Port the native emulator to the browser at ~22-25 MIPS (vs native 85.9/147.6 MIPS, vs c1570/rp2040js ~70M cycles/s) and close all `native ↔ WASM` gaps so the same firmware and tests pass in both.
 
 Explicit user requests in this session:
 1. Read whole codebase and explain it
@@ -39,6 +39,13 @@ Explicit user requests in this session:
 ---
 
 ## 3. What Has Been Done (this session, most recent first)
+
+**Post-v0.50.0 (unreleased):**
+- **M33 dual-core boots** (`src/corepool.c`, `src/cpu.c`): threaded WFI never woke (peripherals only step in core quanta; no fast-forward/forced-wake like cooperative) → deterministic 262K-step stall in USB boot. Mirrored both into worker WFI path. `-cores 2` boots to shell, supervisor on Core 1 (Core 0: 2.6B steps, Core 1: 171M).
+- **SIO bootrom re-announce** (`src/cpu.c`, `src/membus.c`): SDK reset drains our single sentinel push; supervisor's later VLD check saw empty → single-core fallback. Time-gated (>1ms) re-push while core1 waits. Full 6-word launch handshake unhalts core1 (vtor/SP/PC). `test_sio_bootrom_replenish_launch`.
+- **WASM M33 bring-up** (see v0.50.0 follow-ups below): overlay/SRAM/periph init + RP2350 RAM window in `cpu_step_core`.
+- **RV trap trace gated** (`src/rp2350_rv/rv_cpu.c`): ebreak loop wrote 6GB in 2 min.
+- 378/378 tests. WASM bench (hello_usb, Node 22): 25.4 MIPS JIT-off, 22.1 JIT-on (leave off).
 
 **v0.50.0 follow-ups (`c76e58b`, `5338df9`):**
 - **WASM M33 bring-up** (`src/bramble_wasm.c`, `src/cpu.c`): `bramble_init` skipped the M33 overlay (520KB SRAM, RP2350 periph, ROM patch) and `cpu_step_core` hardcoded 264KB RAM — littleOS M33 died instantly with zero output in browser. Fixed; `test-wasm.js` now asserts `root@littleos` shell.
@@ -108,11 +115,9 @@ python3 -m http.server 18081 --directory web &        # Playwright
 
 ## 5. Known Gaps (honest)
 
-- RV32 `health` shows `Temperature: -410.2C` (M33: `26.9C`); same ADC model, so RV softfloat/f2d compute path is suspect, not the sensor.
-- M33 `-cores 2` stalls deterministically in early USB boot (threaded WFI-wakeup gap); single-core unaffected.
+- RV32 `health` shows `Temperature: -410.2C` (M33: `26.9C`). RV Sage floats are bit-exact (literals/div/full formula → `27.1162`), so compute is exonerated; RV UF2 is Mar-21 vintage (M33: Sep-3) and its `adc temp` prints `["` (matches nothing in current source) then ebreak-loops. Needs a fresh RV UF2 (no RISC-V toolchain here).
 - RV32 littleOS runs single-core by firmware design (Hart 1 never launched); interactive shell verified anyway.
 - `web/micropython_rp2350.uf2` prints an RP2040 banner (possibly mislabeled upstream build); eval works.
-- `SagePico` firmware itself unavailable → unverified (hello_usb is the proxy).
 - `web/micropython_rp2040.uf2` shipped is v1.22.1 (old); fresh local build is v1.22.1-ish but needs `micropython-lib` submodule dance.
 
 ---
@@ -126,10 +131,8 @@ python3 -m http.server 18081 --directory web &        # Playwright
 { "models": { "default": "opencode/muse-spark-1.3-contributor-free" } }
 ```
 4. Next suggested tasks (in order):
-    a. RV32 `Temperature: -410.2C` — same ADC model as M33 (`26.9C`), so trace RV softfloat/f2d compute (NOT the sensor). Repro: RV `health` command.
-    b. M33 `-cores 2` threaded stall in early USB boot (deterministic, same ICache counts) — likely WFI wakeup/interrupt delivery in `corepool.c` thread loop; single-core unaffected.
-    c. Promote `web/micropython_rp2040.uf2` to fresh local build (now proven 270k→ REPL), add `hello_usb.elf` symbols to CI.
-    d. Publish WASM JIT vs no-JIT numbers and keep frame budget `500k` note.
+    a. Refresh RV UF2 from current littleOS source (needs RISC-V toolchain) and re-verify temp/`adc temp`; close the stale-firmware gap.
+    b. Promote `web/micropython_rp2040.uf2` to fresh local build (now proven 270k→ REPL), add `hello_usb.elf` symbols to CI.
 
 ---
 

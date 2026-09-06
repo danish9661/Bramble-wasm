@@ -8,7 +8,7 @@ A from-scratch emulator for Raspberry Pi RP2040 and RP2350 microcontrollers, sup
 
 ## Current Status: v0.50.0
 
-377 tests passing (zero warnings). **RP2040**: Boots littleOS shell (UART), TinyUSB CDC `hello_usb`, MicroPython REPL (USB CDC), all peripheral self-tests, `hello_world`/`gpio`/`timer`/`interrupt`/`name_prompt`. **RP2350 RISC-V**: Complete Hazard3 emulation with Zba, Zbb, Zbs, Zcb, Zcmp, and Zbkb extensions; boots littleOS to interactive shell (`health` OK). **RP2350 ARM**: Cortex-M33 mode (`-arch m33`) boots littleOS to shell with SageLang eval (`print(6*7)` = `42`, floats, VFP+DCP), supervisor health nominal. **Tri-architecture**: `-arch m0+` / `-arch m33` / `-arch rv32` with automatic firmware detection via UF2 family ID and picobin IMAGE_DEF blocks. **Networking**: Virtual network bus with TAP bridge, multi-instance Ethernet mesh, W5500 live sockets (via `web/net_proxy.py`), and software-defined devices.
+378 tests passing (zero warnings). **RP2040**: Boots littleOS shell (UART), TinyUSB CDC `hello_usb`, MicroPython REPL (USB CDC), all peripheral self-tests, `hello_world`/`gpio`/`timer`/`interrupt`/`name_prompt`. **RP2350 RISC-V**: Complete Hazard3 emulation with Zba, Zbb, Zbs, Zcb, Zcmp, and Zbkb extensions; boots littleOS to interactive shell (`health` OK). **RP2350 ARM**: Cortex-M33 mode (`-arch m33`) boots littleOS to shell with SageLang eval (`print(6*7)` = `42`, floats, VFP+DCP), supervisor health nominal. **Tri-architecture**: `-arch m0+` / `-arch m33` / `-arch rv32` with automatic firmware detection via UF2 family ID and picobin IMAGE_DEF blocks. **Networking**: Virtual network bus with TAP bridge, multi-instance Ethernet mesh, W5500 live sockets (via `web/net_proxy.py`), and software-defined devices.
 
 ### Coverage
 
@@ -756,7 +756,7 @@ Measured on a 16-CPU Linux x86-64 host (`./build/bramble_bench`, 4.2M-instructio
 |-------|-----------|-------|
 | Native, ICache only | 85.9 MIPS | default |
 | Native, ICache + JIT (`-jit`) | 147.6 MIPS | 1.72x over ICache |
-| WASM in Node 22 (`littleos.uf2`, real firmware + peripherals) | 17–24 MIPS | `node test-wasm.js`; JIT neutral in WASM (leave off) |
+| WASM in Node 22 (`littleos.uf2`, real firmware + peripherals) | 22–25 MIPS | `node test-wasm.js`; JIT slower in WASM (22.1 vs 25.4, leave off) |
 
 For context, the improved pure-JS fork [c1570/rp2040js](https://github.com/c1570/rp2040js) reports ~70M cycles/s on recent PCs. Cycles are not instructions (Thumb averages >1 cycle/instr), so the figures are not directly comparable — but Bramble native is in the same league or faster on CPU-bound loops, while the browser build trades raw speed for the full peripheral set (USB, VNet, SD/eMMC, GDB) that pure-JS emulators lack. Browser frame budget is `500k` instructions/frame (~29ms at 17 MIPS); full 125MHz realtime would need ~80+ MIPS, so heavy firmware runs at ~1/5 realtime in the tab.
 
