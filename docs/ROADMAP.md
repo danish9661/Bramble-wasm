@@ -1,6 +1,11 @@
 # Bramble RP2040/RP2350 Emulator - Roadmap
 
-## Current State: v0.49.0
+## Current State: v0.50.0
+
+| New | littleOS shells + Sage | Complete | M33 boots to shell (IT/SBC/ADC fixes), RV32 boots to shell (PSM + 5 shadow bypasses), Sage eval works (STMIA.W/USAT/SMMULR fixes: print(6*7)=42, floats, 100/10=10), VFP+DCP+RRX (health 26.9C/0.0%), -cores preserved; 377/377, bench 85.9/147.6 MIPS |
+|-----|----------------|----------|-----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
+
+## Previous State: v0.49.0
 
 | New | USB CDC + IRQs | Complete | NVIC user IRQs 26-31 (tud_task pump), level-triggered USBCTRL_IRQ, WFI fast-forward to next alarm; Pico SDK hello_usb prints via CDC native + browser; W5500 real-internet dial verified; real-GDB E2E verified; 326/326 |
 |-----|----------------|----------|-----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|

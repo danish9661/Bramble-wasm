@@ -1,5 +1,63 @@
 # Bramble RP2040/RP2350 Emulator - Changelog
 
+## [0.50.0] - 2026-09-06
+
+### Added - littleOS shells (M33 + RV32), Sage eval, float/double units
+
+- **M33 littleOS boot to shell** (`src/cpu.c`, `src/thumb32.c`,
+  `src/membus.c`): IT-mask parity (newlib `_sbrk` ITE HI), IT-block flag
+  suppression for 16-bit insns (newlib `strlen`), SBCS borrow fold
+  (`hstx_dvi_start` timeout), RP2350 ADC base `0x400A0000`
+  (`supervisor_init`). Boots to `root@littleos:/#`.
+- **RV32 littleOS boot to shell** (`src/rp2350_rv/rv_membus.c`): RP2350 PSM
+  bypasses the shared-bus translation (RP2040 PSM `0x40010000` collides
+  with RP2350 CLOCKS), so `multicore_reset_core1` FIFO works.
+- **RV shadow-translation bypasses** (same file): IO_QSPI, PADS_QSPI, I2C1,
+  PWM, WATCHDOG translate onto RP2350 natives the shared bus claims
+  first in RP2350 mode; routed straight to RP2040-semantics handlers.
+  `test_rv_shadow_bypass` covers all five round-trips.
+- **`-stdin` output decoupling** (`src/uart.c`, `src/usb.c`): `-stdin`
+  selects input only; UART+CDC always emit (previously muted shell).
+- **VFP single-precision** (`src/thumb32.c`): VLDR/VSTR, VLDM/VSTM,
+  VPUSH/VPOP, VMOV, VCVT int<->fp, VADD/VSUB/VMUL/VDIV/VMLA/VMLS/VFMA,
+  VNEG/VABS/VSQRT, VCMP+VMRS/VMSR, VSEL. Supervisor memory reads `0.0%`.
+- **DCP double coprocessor, deferred-compute model** (`src/thumb32.c`):
+  MCRR/MRRC/CDP/MRC + MRC2/MRRC2 with `dcp_x/y/ef` accumulators, IEEE-754
+  results via host double at terminal reads.
+- **RRX barrel shifter** (`src/thumb32.c`): ROR-imm-0 is RRX (+LSR#32/
+  ASR#32). pico_double `__aeabi_f2d` relies on stale-carry RRX; without
+  it every `printf %.1f` was garbage. Health shows `26.9C`, `0.0%`.
+- **STMIA.W L-bit is upper[4]** (`src/thumb32.c`): E8AC stores ran as
+  loads, so multi-word struct copies (Sage 28-byte Tokens) never stored
+  and the Sage lexer froze (`sage 42` OOM-looped, `print(6*7)` parse
+  error). Sage eval now works: `print(6*7)` -> `42`.
+- **USAT/SSAT** (`src/thumb32.c`, layout verified against `as`):
+  pico_double `double2fix64_z` needs `usat`; guarded so F3AF hints are
+  not swallowed. Sage prints integral floats.
+- **Signed-multiply group** (`src/thumb32.c`): SMMULR/SMMLAR/SMMUL/
+  SMMLA/SMMLSR + SMUAD/SMUSD. pico_double div iteration fell into
+  LDR.W-T2 and loaded garbage, so all double division returned 0
+  (`print(100/10)` -> `10`, `print(1/2)` -> `0.500000` now).
+- **`-cores` preserved in `dual_core_init`** (`src/cpu.c`): the reset to
+  1 silently discarded `-cores 2`; both CorePool threads start now.
+
+### Tests
+
+- 377/377 tests passing (344 -> 377 across the release), no regressions.
+- Bench: 85.86 MIPS ICache-only, 147.62 MIPS ICache+JIT.
+- WASM rebuilt + `test-wasm.js` PASS; MicroPython `print(6*7)=42` PASS.
+
+### Known issues
+
+- RV32 `health` shows `Temperature: -410.2C` (M33: `26.9C`); same ADC
+  model, so RV softfloat/f2d compute path is suspect, not the sensor.
+- M33 `-cores 2` stalls deterministically in early USB boot (threaded
+  WFI wakeup gap); single-core unaffected.
+- RV32 littleOS runs single-core by firmware design (Hart 1 never
+  launched); interactive shell verified.
+
+---
+
 ## [0.49.0] - 2026-09-03
 
 ### Fixed - TinyUSB CDC hello, user IRQs, WFI time fast-forward

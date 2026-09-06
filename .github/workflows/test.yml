@@ -14,7 +14,7 @@ jobs:
         run: |
           cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
           cmake --build build -j
-      - name: Unit tests (319)
+      - name: Unit tests (377)
         run: ctest --test-dir build --output-on-failure
       - name: Benchmark smoke
         run: ./build/bramble_bench | tail -n 8
