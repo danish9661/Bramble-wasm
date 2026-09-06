@@ -243,9 +243,11 @@ void rv_trap_enter(rv_cpu_state_t *cpu, uint32_t cause, uint32_t tval) {
     cpu->csr[CSR_MCAUSE] = cause;
     cpu->csr[CSR_MTVAL] = tval;
 
-    /* Always log traps to stderr for debugging */
-    fprintf(stderr, "[RV-CORE%d] TRAP: cause=0x%08X mepc=0x%08X tval=0x%08X -> handler=0x%08X\n",
-            cpu->hart_id, cause, cpu->csr[CSR_MEPC], tval, cpu->csr[CSR_MTVEC] & ~3u);
+    /* Trap trace (debug builds only -- an ebreak loop here once
+     * wrote 6GB in two minutes). */
+    if (cpu->debug_enabled)
+        fprintf(stderr, "[RV-CORE%d] TRAP: cause=0x%08X mepc=0x%08X tval=0x%08X -> handler=0x%08X\n",
+                cpu->hart_id, cause, cpu->csr[CSR_MEPC], tval, cpu->csr[CSR_MTVEC] & ~3u);
 
     /* Save and clear MIE */
     uint32_t mstatus = cpu->csr[CSR_MSTATUS];
