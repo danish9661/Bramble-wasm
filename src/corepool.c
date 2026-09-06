@@ -27,6 +27,7 @@
 #include "rtc.h"
 #include "timer.h"
 #include "usb.h"
+#include "rp2350_rv/rp2350_periph.h"
 
 /*
  * Each host thread keeps the big lock for a short burst of guest work before
@@ -311,6 +312,23 @@ static void *core_thread_fn(void *arg) {
                        nvic_states[core_id].pendsv_pending;
 
             if (!wake) {
+                /* Keep peripherals progressing while cores sleep (mirrors the
+                 * cooperative loop's unconditional pio_step/usb_step): USB
+                 * enumeration only advances inside stepping quanta, so a WFI
+                 * wait on a USB interrupt would otherwise deadlock
+                 * (M33 -cores 2 stalled deterministically in USB boot). */
+                if (core_id == CORE0) {
+                    pio_step();
+                    usb_step();
+                }
+                set_active_core(core_id);
+                pending = nvic_get_pending_irq();
+                wake = (pending != 0xFFFFFFFF) ||
+                       systick_states[core_id].pending ||
+                       nvic_states[core_id].pendsv_pending;
+            }
+
+            if (!wake) {
                 /* Sleep with 1ms timeout (for periodic checks) */
                 struct timespec start;
                 struct timespec ts;
@@ -337,14 +355,46 @@ static void *core_thread_fn(void *arg) {
                     systick_tick_for_core(core_id, (uint32_t)elapsed_cycles);
                 }
 
-                /* If every active core is sleeping/halted, use host elapsed time
-                 * as a fallback so timer-driven wakeups still happen. */
+                /* If every active core is sleeping/halted, fast-forward time
+                 * to the next timer deadline (mirrors the cooperative loop)
+                 * instead of trickling host-elapsed microseconds: a
+                 * far-future sleep_until would otherwise take minutes of
+                 * wall time. Bounded spurious wakeup (~5ms) covers waits
+                 * whose IRQ was never programmed (SDK alarm-pool
+                 * callbacks): real HW wakes WFE on SEV and the loops always
+                 * re-check, so this is harmless. */
+                static uint32_t wfe_wake_acc_us[2] = {0, 0};
                 if (core_id == CORE0 &&
-                    (num_active_cores == 1 || cores[CORE1].is_wfi || cores[CORE1].is_halted) &&
-                    elapsed_us > 0) {
-                    timer_tick(elapsed_us);
-                    rtc_tick(elapsed_us);
+                    (num_active_cores == 1 || cores[CORE1].is_wfi || cores[CORE1].is_halted)) {
+                    uint32_t chunk_us = timer_next_wakeup_us();
+                    if (chunk_us > 10000) chunk_us = 10000;
+                    uint32_t tick_us = (chunk_us > elapsed_us) ? chunk_us : elapsed_us;
+                    if (tick_us > 0) {
+                        /* SysTick already got elapsed_us above; add only the
+                         * fast-forward extra. Timer/RTC get the full chunk
+                         * (they received nothing yet on this path). */
+                        uint32_t extra_us = tick_us - elapsed_us;
+                        if (extra_us > 0) {
+                            uint64_t extra_cycles = (uint64_t)extra_us * timing_config.cycles_per_us;
+                            if (extra_cycles > 0xFFFFFFFFu) extra_cycles = 0xFFFFFFFFu;
+                            systick_tick_for_core(core_id, (uint32_t)extra_cycles);
+                        }
+                        timer_tick(tick_us);
+                        rtc_tick(tick_us);
+                        if (membus_rp2350_mode && membus_rp2350_periph) {
+                            rp2350_timer1_tick((rp2350_periph_state_t *)membus_rp2350_periph,
+                                               tick_us);
+                        }
+                    }
+                    wfe_wake_acc_us[core_id] += tick_us;
+                    if (wfe_wake_acc_us[core_id] >= 5000) {
+                        wfe_wake_acc_us[core_id] = 0;
+                        cores[core_id].is_wfi = 0;
+                    }
                 }
+                /* NOTE: when other cores are active, guest steps advance
+                 * time via cpu_step; nothing to do here (matches the old
+                 * host-elapsed fallback, which also skipped that case). */
 
                 pthread_mutex_unlock(&corepool.emu_lock);
                 continue;
