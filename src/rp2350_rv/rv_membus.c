@@ -12,6 +12,8 @@
 #include "rp2350_rv/rp2350_memmap.h"
 #include "clocks.h"
 #include "emulator.h"
+#include "i2c.h"
+#include "pwm.h"
 
 #define RV_SHARED_RP2040_SYSCFG_BASE     0x40004000u
 #define RV_SHARED_RP2040_CLOCKS_BASE     0x40008000u
@@ -218,6 +220,26 @@ uint32_t rv_mem_read32(rv_membus_state_t *bus, uint32_t addr) {
     if ((addr & ~0x3FFFu) == RP2350_PSM_BASE)
         return psm_read(addr);
 
+    /* Shadowed-translation bypasses: these RP2350 blocks translate to
+     * RP2040 targets that alias DIFFERENT RP2350 natives, which the
+     * shared bus (in RP2350 mode) claims first:
+     *   IO_QSPI  -> 0x40018000 (= RP2350 PSM, clocks handler wins)
+     *   PADS_QSPI-> 0x40020000 (= RP2350 RESETS, clocks handler wins)
+     *   I2C1     -> 0x40048000 (= RP2350 XOSC, clocks handler wins)
+     *   PWM      -> 0x40050000 (= RP2350 PLL_SYS, clocks handler wins)
+     *   WATCHDOG -> 0x40058000 (= RP2350 PLL_USB, clocks handler wins)
+     * Route straight to the RP2040-semantics handlers (PSM pattern). */
+    if ((addr & ~0x3FFFu) == RP2350_IO_QSPI_BASE)
+        return io_qspi_read(addr & 0xFFFu);
+    if ((addr & ~0x3FFFu) == RP2350_PADS_QSPI_BASE)
+        return pads_qspi_read(addr & 0xFFFu);
+    if ((addr & ~0x3FFFu) == RP2350_I2C1_BASE)
+        return i2c_read32(1, addr & 0xFFFu);
+    if ((addr & ~0x3FFFu) == RP2350_PWM_BASE)
+        return pwm_read32(addr & 0xFFFu);
+    if ((addr & ~0x3FFFu) == RP2350_WATCHDOG_BASE)
+        return watchdog_read(RV_SHARED_RP2040_WATCHDOG_BASE | (addr & 0xFFFu));
+
     /* RP2350-specific peripherals */
     if (rp2350_periph_match(addr))
         return rp2350_periph_read32(&bus->periph, addr);
@@ -264,6 +286,46 @@ void rv_mem_write32(rv_membus_state_t *bus, uint32_t addr, uint32_t val) {
      * cannot be used here). */
     if ((addr & ~0x3FFFu) == RP2350_PSM_BASE) {
         psm_write(addr, val, (addr >> 12) & 3);
+        return;
+    }
+
+    /* Shadowed-translation bypasses (see read path). Atomic aliases
+     * (+0x1000 XOR/+0x2000 SET/+0x3000 CLR) mirror the shared bus. */
+    if ((addr & ~0x3FFFu) == RP2350_IO_QSPI_BASE) {
+        uint32_t alias = addr & 0x3000u, off = addr & 0xFFFu;
+        if (alias == 0x0000) io_qspi_write(off, val);
+        else if (alias == 0x2000) io_qspi_write(off, io_qspi_read(off) | val);
+        else if (alias == 0x3000) io_qspi_write(off, io_qspi_read(off) & ~val);
+        else io_qspi_write(off, io_qspi_read(off) ^ val);
+        return;
+    }
+    if ((addr & ~0x3FFFu) == RP2350_PADS_QSPI_BASE) {
+        uint32_t alias = addr & 0x3000u, off = addr & 0xFFFu;
+        if (alias == 0x0000) pads_qspi_write(off, val);
+        else if (alias == 0x2000) pads_qspi_write(off, pads_qspi_read(off) | val);
+        else if (alias == 0x3000) pads_qspi_write(off, pads_qspi_read(off) & ~val);
+        else pads_qspi_write(off, pads_qspi_read(off) ^ val);
+        return;
+    }
+    if ((addr & ~0x3FFFu) == RP2350_I2C1_BASE) {
+        uint32_t alias = addr & 0x3000u, off = addr & 0xFFFu;
+        if (alias == 0x0000) i2c_write32(1, off, val);
+        else if (alias == 0x2000) i2c_write32(1, off, i2c_read32(1, off) | val);
+        else if (alias == 0x3000) i2c_write32(1, off, i2c_read32(1, off) & ~val);
+        else i2c_write32(1, off, i2c_read32(1, off) ^ val);
+        return;
+    }
+    if ((addr & ~0x3FFFu) == RP2350_PWM_BASE) {
+        uint32_t alias = addr & 0x3000u, off = addr & 0xFFFu;
+        if (alias == 0x0000) pwm_write32(off, val);
+        else if (alias == 0x2000) pwm_write32(off, pwm_read32(off) | val);
+        else if (alias == 0x3000) pwm_write32(off, pwm_read32(off) & ~val);
+        else pwm_write32(off, pwm_read32(off) ^ val);
+        return;
+    }
+    if ((addr & ~0x3FFFu) == RP2350_WATCHDOG_BASE) {
+        watchdog_write(RV_SHARED_RP2040_WATCHDOG_BASE | (addr & 0xFFFu),
+                       val, (addr >> 12) & 3);
         return;
     }
 

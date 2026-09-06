@@ -257,6 +257,14 @@ extern int mem_debug_unmapped;
 void mem_write32(uint32_t addr, uint32_t val);
 uint32_t mem_read32(uint32_t addr);
 
+/* IO_QSPI / PADS_QSPI direct access (shared by ARM bus and RV bus; RV must
+ * bypass the shared-bus translation whose RP2040 targets collide with
+ * RP2350 PSM/RESETS natives). Offset is addr & 0xFFF. */
+uint32_t io_qspi_read(uint32_t offset);
+void io_qspi_write(uint32_t offset, uint32_t val);
+uint32_t pads_qspi_read(uint32_t offset);
+void pads_qspi_write(uint32_t offset, uint32_t val);
+
 /* RP2350 mode flag: enables RP2350 SYSINFO, peripheral routing, 520KB SRAM */
 extern int membus_rp2350_mode;
 /* RP2350 peripheral state for M33 mode (set by main.c) — void* to avoid header dependency */

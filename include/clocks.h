@@ -203,6 +203,12 @@ void clocks_write32(uint32_t addr, uint32_t val);
 uint32_t psm_read(uint32_t addr);
 void psm_write(uint32_t addr, uint32_t val, uint32_t alias);
 
+/* Watchdog direct access (shared by ARM bus and RV bus; RV must bypass the
+ * shared-bus translation whose RP2040 WATCHDOG address collides with RP2350
+ * PLL_USB). addr is canonical (offset = addr & 0xFFF). */
+uint32_t watchdog_read(uint32_t addr);
+void watchdog_write(uint32_t addr, uint32_t val, uint32_t alias);
+
 extern clocks_state_t clocks_state;
 
 /* Watchdog reboot flag - set when CTRL.TRIGGER is written */

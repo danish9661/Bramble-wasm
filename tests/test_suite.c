@@ -6101,6 +6101,34 @@ TEST(test_rv_psm_core1_reset) {
     PASS();
 }
 
+TEST(test_rv_shadow_bypass) {
+    /* RV-translated targets that alias RP2350 natives must bypass the
+     * shared bus (which claims them for the RP2350 peripheral in
+     * RP2350 mode): IO_QSPI->PSM, PADS_QSPI->RESETS, I2C1->XOSC,
+     * PWM->PLL_SYS, WATCHDOG->PLL_USB. Same pattern as the PSM fix. */
+    int saved_mode = membus_rp2350_mode;
+    membus_rp2350_mode = 1;
+    rv_membus_state_t bus;
+    rv_membus_init(&bus, cpu.flash, FLASH_SIZE, 1);
+    rv_mem_write32(&bus, 0x400A8000 + 0x0C, 0x1234); /* PWM slice0 CC */
+    ASSERT_EQ(0x1234u, rv_mem_read32(&bus, 0x400A8000 + 0x0C) & 0xFFFFu,
+                "PWM CC round-trips via RV bus");
+    rv_mem_write32(&bus, 0x40030000 + 0x04, 0x1F); /* IO_QSPI CTRL0 */
+    ASSERT_EQ(0x1Fu, rv_mem_read32(&bus, 0x40030000 + 0x04),
+                "IO_QSPI CTRL round-trips via RV bus");
+    rv_mem_write32(&bus, 0x40040000 + 0x00, 0x40); /* PADS_QSPI VOLTAGE */
+    ASSERT_EQ(0x40u, rv_mem_read32(&bus, 0x40040000 + 0x00),
+                "PADS_QSPI round-trips via RV bus");
+    rv_mem_write32(&bus, 0x40098000 + 0x00, 0x65); /* I2C1 CON */
+    ASSERT_EQ(0x65u, rv_mem_read32(&bus, 0x40098000 + 0x00),
+                "I2C1 CON round-trips via RV bus");
+    rv_mem_write32(&bus, 0x400D8000 + 0x0C, 0xDEADBEEF); /* WD SCRATCH0 */
+    ASSERT_EQ(0xDEADBEEFu, rv_mem_read32(&bus, 0x400D8000 + 0x0C),
+                "WD SCRATCH round-trips via RV bus");
+    membus_rp2350_mode = saved_mode;
+    PASS();
+}
+
 TEST(test_rv_bootrom_init) {
     rv_membus_state_t bus;
     rv_membus_init(&bus, cpu.flash, FLASH_SIZE, 1);
@@ -6745,6 +6773,7 @@ int main(void) {
     BEGIN_CATEGORY("RISC-V Memory Bus");
     RUN_TEST(test_rv_membus_sram);
     RUN_TEST(test_rv_psm_core1_reset);
+    RUN_TEST(test_rv_shadow_bypass);
     RUN_TEST(test_rv_bootrom_init);
     END_CATEGORY("RISC-V Memory Bus");
 

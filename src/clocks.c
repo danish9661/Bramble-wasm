@@ -297,7 +297,7 @@ static void pll_write(pll_state_t *pll, uint32_t offset, uint32_t val,
  * Watchdog
  * ======================================================================== */
 
-static uint32_t watchdog_read(uint32_t addr) {
+uint32_t watchdog_read(uint32_t addr) {
     uint32_t offset = addr & 0xFFF;
     switch (offset) {
         case 0x00: /* CTRL */
@@ -323,7 +323,7 @@ static uint32_t watchdog_read(uint32_t addr) {
     }
 }
 
-static void watchdog_write(uint32_t addr, uint32_t val, uint32_t alias) {
+void watchdog_write(uint32_t addr, uint32_t val, uint32_t alias) {
     uint32_t offset = addr & 0xFFF;
     switch (offset) {
         case 0x00: /* CTRL */ {

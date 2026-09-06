@@ -162,7 +162,7 @@ static int io_qspi_match(uint32_t addr) {
     return (base >= IO_QSPI_BASE && base < IO_QSPI_BASE + IO_QSPI_BLOCK_SIZE);
 }
 
-static uint32_t io_qspi_read(uint32_t offset) {
+uint32_t io_qspi_read(uint32_t offset) {
     /* Pin registers: each pin has STATUS at +0, CTRL at +4, 8 bytes apart */
     if (offset < 0x30) {
         uint32_t pin = offset / 8;
@@ -182,7 +182,7 @@ static uint32_t io_qspi_read(uint32_t offset) {
     }
 }
 
-static void io_qspi_write(uint32_t offset, uint32_t val) {
+void io_qspi_write(uint32_t offset, uint32_t val) {
     if (offset < 0x30) {
         uint32_t pin = offset / 8;
         uint32_t reg = offset % 8;
@@ -232,12 +232,12 @@ static int gpio_bus_match(uint32_t addr) {
             (addr >= SIO_BASE_GPIO && addr < SIO_BASE_GPIO + 0x100));
 }
 
-static uint32_t pads_qspi_read(uint32_t offset) {
+uint32_t pads_qspi_read(uint32_t offset) {
     if (offset < sizeof(pads_qspi_regs)) return pads_qspi_regs[offset / 4];
     return 0;
 }
 
-static void pads_qspi_write(uint32_t offset, uint32_t val) {
+void pads_qspi_write(uint32_t offset, uint32_t val) {
     if (offset < sizeof(pads_qspi_regs)) pads_qspi_regs[offset / 4] = val;
 }
 
