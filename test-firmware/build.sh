@@ -292,9 +292,47 @@ arm-none-eabi-objcopy -O binary uart_echo.elf uart_echo.bin
 python3 ../uf2conv.py uart_echo.bin -o ../../uart_echo.uf2 -b 0x10000100 -f 0xE48BFF56
 echo " ✓ uart_echo.uf2"
 
+# RP2350 M33 variants
+for t in clocks_test psm_test ws2812_test rtc_test uart_echo; do
+echo " - Building ${t}_pico2.uf2..."
+arm-none-eabi-gcc -mcpu=cortex-m33 -mthumb -DRP2350 -c ../$t.S -o ${t}_pico2.o
+arm-none-eabi-ld -T ../linker.ld ${t}_pico2.o -o ${t}_pico2.elf
+arm-none-eabi-objcopy -O binary ${t}_pico2.elf ${t}_pico2.bin
+python3 ../uf2conv.py ${t}_pico2.bin -o ../../${t}_pico2.uf2 -b 0x10000100 -f 0xE48BFF59
+echo " ✓ ${t}_pico2.uf2"
+done
+echo " - Building fp_test_pico2.uf2..."
+arm-none-eabi-gcc -mcpu=cortex-m33 -mthumb -DRP2350 -c ../fp_test.S -o fp_test_pico2.o
+arm-none-eabi-gcc -mcpu=cortex-m33 -mthumb -mfloat-abi=soft -DRP2350 -nostartfiles -T ../linker.ld fp_test_pico2.o -lgcc -o fp_test_pico2.elf
+arm-none-eabi-objcopy -O binary fp_test_pico2.elf fp_test_pico2.bin
+python3 ../uf2conv.py fp_test_pico2.bin -o ../../fp_test_pico2.uf2 -b 0x10000100 -f 0xE48BFF59
+echo " ✓ fp_test_pico2.uf2"
+
 echo ""
 
-echo "✓ All firmware built successfully (11/11)"
+echo "✓ All firmware built successfully (17/17)"
+
+;;
+
+*_pico2)
+
+BASE="${1%_pico2}"
+echo "[1/3] Compiling $BASE.S for RP2350 M33..."
+arm-none-eabi-gcc -mcpu=cortex-m33 -mthumb -DRP2350 -c ../$BASE.S -o ${BASE}_pico2.o
+
+echo "[2/3] Linking..."
+if [ "$BASE" = "fp_test" ]; then
+  arm-none-eabi-gcc -mcpu=cortex-m33 -mthumb -mfloat-abi=soft -DRP2350 -nostartfiles -T ../linker.ld ${BASE}_pico2.o -lgcc -o ${BASE}_pico2.elf
+else
+  arm-none-eabi-ld -T ../linker.ld ${BASE}_pico2.o -o ${BASE}_pico2.elf
+fi
+
+echo "[3/3] Converting to UF2..."
+arm-none-eabi-objcopy -O binary ${BASE}_pico2.elf ${BASE}_pico2.bin
+
+python3 ../uf2conv.py ${BASE}_pico2.bin -o ../../${BASE}_pico2.uf2 -b 0x10000100 -f 0xE48BFF59
+
+echo "✓ Build complete: ${BASE}_pico2.uf2"
 
 ;;
 
@@ -311,6 +349,10 @@ echo " name_prompt - Build interactive UART stdin test"
 echo " clocks - Build clocks register readout test"
 echo " psm - Build PSM register readout test"
 echo " fp - Build softfloat double (0.1+0.2) test"
+echo " ws2812 - Build PIO WS2812 bitstream test"
+echo " rtc - Build RTC readout test"
+echo " uart_echo - Build UART echo test"
+echo " <name>_pico2 - RP2350 M33 variant of any target (-DRP2350)"
 echo " ws2812 - Build PIO WS2812 bitstream test"
 echo " rtc - Build RTC readout test"
 echo " uart_echo - Build UART echo test"

@@ -11,17 +11,41 @@
  */
 
 .syntax unified
+#ifdef RP2350
+.cpu cortex-m33
+#else
 .cpu cortex-m0plus
+#endif
 .thumb
 
+#ifdef RP2350
+.equ UART0_DR,          0x40070000
+.equ UART0_CR,          0x40070030
+#else
 .equ UART0_DR,          0x40034000
-.equ UART0_CR,          0x40034030
+#endif
 .equ UART_CR_EN,        0x0301
+#ifdef RP2350
+.equ RAM_TOP,           0x20082000
+#else
 .equ RAM_TOP,           0x20042000
+#endif
 
+#ifdef RP2350
+.equ RESETS_RESET,      0x40020000
+#else
 .equ RESETS_RESET,      0x4000C000
+#endif
+#ifdef RP2350
+.equ CLK_SYS_SELECTED,  0x40010044
+#else
 .equ CLK_SYS_SELECTED,  0x40008044
+#endif
+#ifdef RP2350
+.equ PLL_SYS_CS,        0x40050000
+#else
 .equ PLL_SYS_CS,        0x40028000
+#endif
 
 .section .vectors, "a", %progbits
 .align 2
@@ -126,11 +150,23 @@ hex_out:
 msg_start:
     .asciz "Clocks Test Starting (RESETS/CLOCKS/PLL_SYS)\n"
 msg_reset:
+    #ifdef RP2350
+    .asciz "RESETS RESET register 0x40020000 = "
+    #else
     .asciz "RESETS RESET register 0x4000C000 = "
+    #endif
 msg_clksys:
+    #ifdef RP2350
+    .asciz "CLK_SYS_SELECTED register 0x40010044 = "
+    #else
     .asciz "CLK_SYS_SELECTED register 0x40008044 = "
+    #endif
 msg_pll:
+    #ifdef RP2350
+    .asciz "PLL_SYS_CS register 0x40050000 = "
+    #else
     .asciz "PLL_SYS_CS register 0x40028000 = "
+    #endif
 msg_done:
     .asciz "Clocks Test Complete!\n"
 

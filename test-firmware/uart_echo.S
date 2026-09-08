@@ -8,15 +8,28 @@
  */
 
 .syntax unified
+#ifdef RP2350
+.cpu cortex-m33
+#else
 .cpu cortex-m0plus
+#endif
 .thumb
 
+#ifdef RP2350
+.equ UART0_DR,          0x40070000
+.equ UART0_CR,          0x40070030
+#else
 .equ UART0_DR,          0x40034000
-.equ UART0_FR,          0x40034018
 .equ UART0_CR,          0x40034030
+#endif
+.equ UART0_FR,          0x40034018
 .equ UART_CR_EN,        0x0301
 .equ UART_FR_RXFE,      0x10
+#ifdef RP2350
+.equ RAM_TOP,           0x20082000
+#else
 .equ RAM_TOP,           0x20042000
+#endif
 .equ LINE_BUF,          0x20041000
 .equ LINE_MAX,          64
 

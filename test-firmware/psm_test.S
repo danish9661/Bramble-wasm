@@ -10,17 +10,41 @@
  */
 
 .syntax unified
+#ifdef RP2350
+.cpu cortex-m33
+#else
 .cpu cortex-m0plus
+#endif
 .thumb
 
+#ifdef RP2350
+.equ UART0_DR,          0x40070000
+.equ UART0_CR,          0x40070030
+#else
 .equ UART0_DR,          0x40034000
-.equ UART0_CR,          0x40034030
+#endif
 .equ UART_CR_EN,        0x0301
+#ifdef RP2350
+.equ RAM_TOP,           0x20082000
+#else
 .equ RAM_TOP,           0x20042000
+#endif
 
+#ifdef RP2350
+.equ PSM_FRCE_OFF,      0x40018004
+#else
 .equ PSM_FRCE_OFF,      0x40010004
+#endif
+#ifdef RP2350
+.equ PSM_FRCE_ON,       0x40018008
+#else
 .equ PSM_FRCE_ON,       0x40010008
+#endif
+#ifdef RP2350
+.equ PSM_DONE,          0x40018020
+#else
 .equ PSM_DONE,          0x40010020
+#endif
 
 .section .vectors, "a", %progbits
 .align 2
@@ -125,11 +149,23 @@ hex_out:
 msg_start:
     .asciz "PSM Test Starting (PSM 0x40010000)\n"
 msg_off:
+    #ifdef RP2350
+    .asciz "PSM FRCE_OFF register 0x40018004 = "
+    #else
     .asciz "PSM FRCE_OFF register 0x40010004 = "
+    #endif
 msg_on:
+    #ifdef RP2350
+    .asciz "PSM FRCE_ON register 0x40018008 = "
+    #else
     .asciz "PSM FRCE_ON register 0x40010008 = "
+    #endif
 msg_done_reg:
+    #ifdef RP2350
+    .asciz "PSM DONE register 0x40018020 = "
+    #else
     .asciz "PSM DONE register 0x40010020 = "
+    #endif
 msg_done:
     .asciz "PSM Test Complete!\n"
 
