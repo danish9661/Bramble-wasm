@@ -54,52 +54,77 @@
     </div>
 
     <div class="panel">
-      <h3>Examples - RP2040 (M0+)</h3>
-      <div class="btn-row" style="margin-bottom:4px">
-        <button class="btn" onclick="loadPreset('hello_world.uf2')">hello_world</button>
-        <button class="btn" onclick="loadPreset('gpio_test.uf2')">gpio_test</button>
-        <button class="btn" onclick="loadPreset('timer_test.uf2')">timer</button>
-        <button class="btn" onclick="loadPreset('interrupt_test.uf2')">interrupt</button>
-        <button class="btn" onclick="loadPreset('name_prompt.uf2')">name_prompt</button>
-        <button class="btn" onclick="loadPreset('littleos.uf2')">littleOS</button>
-        <button class="btn" onclick="loadPreset('micropython_rp2040.uf2')">MicroPython</button>
-      </div>
-      <div class="btn-row" style="margin-bottom:6px">
-        <button class="btn" onclick="loadPreset('spi_test.uf2')">SPI 0x4003C000</button>
-        <button class="btn" onclick="loadPreset('i2c_test.uf2')">I2C 0x40044000</button>
-        <button class="btn" onclick="loadPreset('pwm_test.uf2')">PWM</button>
-        <button class="btn" onclick="loadPreset('adc_test.uf2')">ADC</button>
-        <button class="btn" onclick="loadPreset('dma_test.uf2')">DMA</button>
-        <button class="btn" onclick="loadPreset('pio_test.uf2')">PIO</button>
-        <button class="btn" onclick="loadPreset('usb_test.uf2')">USB</button>
-        <button class="btn" onclick="loadPreset('hello_usb.uf2')">hello_usb CDC</button>
-        <button class="btn" onclick="loadPreset('clocks_test.uf2')">Clocks</button>
-        <button class="btn" onclick="loadPreset('psm_test.uf2')">PSM</button>
-        <button class="btn" onclick="loadPreset('fp_test.uf2')">FP dbl</button>
-        <button class="btn" onclick="loadPreset('ws2812_test.uf2')">WS2812</button>
-        <button class="btn" onclick="loadPreset('rtc_test.uf2')">RTC</button>
-        <button class="btn" onclick="loadPreset('uart_echo.uf2')">UART echo</button>
-      </div>
-      <div style="font-size:11px;color:#53a8b6;margin-bottom:4px">RP2350 M33 (ARM) / RV32 (RISC-V) - 520KB SRAM</div>
-      <div class="btn-row" style="margin-bottom:4px">
-        <button class="btn" onclick="loadPreset('littleos_pico2.uf2')">littleOS M33</button>
-        <button class="btn" onclick="loadPreset('littleos_pico2_riscv.uf2')">littleOS RV32</button>
-        <button class="btn" onclick="loadPreset('micropython_rp2350.uf2')">MicroPython</button>
-      </div>
-      <div class="btn-row">
-        <button class="btn" onclick="loadPreset('spi_test_pico2.uf2')">SPI M33</button>
-        <button class="btn" onclick="loadPreset('i2c_test_pico2.uf2')">I2C M33</button>
-        <button class="btn" onclick="loadPreset('pwm_test_pico2.uf2')">PWM M33</button>
-        <button class="btn" onclick="loadPreset('adc_test_pico2.uf2')">ADC M33</button>
-        <button class="btn" onclick="loadPreset('dma_test_pico2.uf2')">DMA M33</button>
-        <button class="btn" onclick="loadPreset('pio_test_pico2.uf2')">PIO M33</button>
-        <button class="btn" onclick="loadPreset('usb_test_pico2.uf2')">USB M33</button>
-        <button class="btn" onclick="loadPreset('clocks_test_pico2.uf2')">Clocks M33</button>
-        <button class="btn" onclick="loadPreset('psm_test_pico2.uf2')">PSM M33</button>
-        <button class="btn" onclick="loadPreset('fp_test_pico2.uf2')">FP M33</button>
-        <button class="btn" onclick="loadPreset('ws2812_test_pico2.uf2')">WS2812 M33</button>
-        <button class="btn" onclick="loadPreset('rtc_test_pico2.uf2')">RTC M33</button>
-        <button class="btn" onclick="loadPreset('uart_echo_pico2.uf2')">Echo M33</button>
+      <h3>Examples</h3>
+      <div style="display:flex;flex-direction:column;gap:6px">
+        <label style="font-size:11px;color:#53a8b6">RP2040 (M0+)
+          <select id="demo-rp2040" style="width:100%;background:#0a0a1a;color:#e0e0e0;border:1px solid #0f3460;padding:4px;font-size:12px" onchange="if(this.value){loadPreset(this.value);this.selectedIndex=0}">
+            <option value="">-- select RP2040 demo --</option>
+            <option value="hello_world.uf2">hello_world</option>
+            <option value="gpio_test.uf2">gpio_test</option>
+            <option value="timer_test.uf2">timer</option>
+            <option value="interrupt_test.uf2">interrupt</option>
+            <option value="name_prompt.uf2">name_prompt</option>
+            <option value="littleos.uf2">littleOS</option>
+            <option value="micropython_rp2040.uf2">MicroPython</option>
+            <option value="spi_test.uf2">SPI 0x4003C000</option>
+            <option value="i2c_test.uf2">I2C 0x40044000</option>
+            <option value="pwm_test.uf2">PWM</option>
+            <option value="adc_test.uf2">ADC</option>
+            <option value="dma_test.uf2">DMA</option>
+            <option value="pio_test.uf2">PIO</option>
+            <option value="usb_test.uf2">USB</option>
+            <option value="hello_usb.uf2">hello_usb CDC</option>
+            <option value="clocks_test.uf2">Clocks</option>
+            <option value="psm_test.uf2">PSM</option>
+            <option value="fp_test.uf2">FP dbl</option>
+            <option value="ws2812_test.uf2">WS2812</option>
+            <option value="rtc_test.uf2">RTC</option>
+            <option value="uart_echo.uf2">UART echo</option>
+          </select>
+        </label>
+        <label style="font-size:11px;color:#53a8b6">RP2350 M33 (ARM) - 520KB SRAM
+          <select id="demo-m33" style="width:100%;background:#0a0a1a;color:#e0e0e0;border:1px solid #0f3460;padding:4px;font-size:12px" onchange="if(this.value){loadPreset(this.value);this.selectedIndex=0}">
+            <option value="">-- select M33 demo --</option>
+            <option value="littleos_pico2.uf2">littleOS M33</option>
+            <option value="micropython_rp2350.uf2">MicroPython</option>
+            <option value="spi_test_pico2.uf2">SPI M33</option>
+            <option value="i2c_test_pico2.uf2">I2C M33</option>
+            <option value="pwm_test_pico2.uf2">PWM M33</option>
+            <option value="adc_test_pico2.uf2">ADC M33</option>
+            <option value="dma_test_pico2.uf2">DMA M33</option>
+            <option value="pio_test_pico2.uf2">PIO M33</option>
+            <option value="usb_test_pico2.uf2">USB M33</option>
+            <option value="clocks_test_pico2.uf2">Clocks M33</option>
+            <option value="psm_test_pico2.uf2">PSM M33</option>
+            <option value="fp_test_pico2.uf2">FP M33</option>
+            <option value="ws2812_test_pico2.uf2">WS2812 M33</option>
+            <option value="rtc_test_pico2.uf2">RTC M33</option>
+            <option value="uart_echo_pico2.uf2">Echo M33</option>
+          </select>
+        </label>
+        <label style="font-size:11px;color:#53a8b6">RP2350 RV32 (RISC-V) - 520KB SRAM
+          <select id="demo-rv32" style="width:100%;background:#0a0a1a;color:#e0e0e0;border:1px solid #0f3460;padding:4px;font-size:12px" onchange="if(this.value){loadPreset(this.value);this.selectedIndex=0}">
+            <option value="">-- select RV32 demo --</option>
+            <option value="littleos_pico2_riscv.uf2">littleOS RV32</option>
+            <option value="hello_rv32.uf2">Hello RV32</option>
+            <option value="gpio_rv32.uf2">GPIO RV32</option>
+            <option value="timer_rv32.uf2">Timer RV32</option>
+            <option value="interrupt_rv32.uf2">IRQ RV32</option>
+            <option value="spi_rv32.uf2">SPI RV32</option>
+            <option value="i2c_rv32.uf2">I2C RV32</option>
+            <option value="pwm_rv32.uf2">PWM RV32</option>
+            <option value="adc_rv32.uf2">ADC RV32</option>
+            <option value="dma_rv32.uf2">DMA RV32</option>
+            <option value="pio_rv32.uf2">PIO RV32</option>
+            <option value="usb_rv32.uf2">USB RV32</option>
+            <option value="clocks_rv32.uf2">Clocks RV32</option>
+            <option value="psm_rv32.uf2">PSM RV32</option>
+            <option value="ws2812_rv32.uf2">WS2812 RV32</option>
+            <option value="rtc_rv32.uf2">RTC RV32</option>
+            <option value="uart_echo_rv32.uf2">Echo RV32</option>
+            <option value="name_prompt_rv32.uf2">Name RV32</option>
+          </select>
+        </label>
       </div>
     </div>
 
