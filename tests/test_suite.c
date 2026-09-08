@@ -1464,6 +1464,33 @@ TEST(test_uart_rx_fifo_full_flag) {
     PASS();
 }
 
+TEST(test_uart_byte_rx) {
+    /* Byte/halfword DR reads must see queued bytes (LDRB path). */
+    reset_cpu();
+    uart_rx_push(0, 'A');
+    ASSERT_EQ('A', mem_read8(UART0_BASE + UART_DR), "LDRB DR returns byte");
+    uart_rx_push(0, 'A');
+    ASSERT_EQ('A', mem_read16(UART0_BASE + UART_DR) & 0xFFu,
+                "LDRH DR returns byte");
+    uint32_t fr = mem_read8(UART0_BASE + UART_FR);
+    ASSERT_TRUE(fr & UART_FR_RXFE, "RXFE set once drained");
+    PASS();
+}
+
+TEST(test_uart_subword_tx_preserves_rx) {
+    /* Subword DR writes push TX without popping RX (no RMW read). */
+    reset_cpu();
+    uart_rx_push(0, 'Q');
+    mem_write8(UART0_BASE + UART_DR, 'Z');
+    ASSERT_EQ('Q', mem_read32(UART0_BASE + UART_DR) & 0xFFu,
+                "byte TX does not pop RX");
+    uart_rx_push(0, 'Q');
+    mem_write16(UART0_BASE + UART_DR, 'Y');
+    ASSERT_EQ('Q', mem_read32(UART0_BASE + UART_DR) & 0xFFu,
+                "halfword TX does not pop RX");
+    PASS();
+}
+
 TEST(test_uart_rx_fifo_order) {
     reset_cpu();
     /* Push 3 bytes, read them back in FIFO order */
@@ -3077,6 +3104,102 @@ TEST(test_pio_pull_blocking_stalls) {
     uint16_t pull_block = pio_enc(PIO_OP_PUSH_PULL, 0, (1 << 7) | (0 << 6) | (1 << 5));
     pio_sm_exec(0, 0, pull_block);
     ASSERT_EQ(1, s->stalled, "PULL blocking on empty FIFO should stall");
+    PASS();
+}
+
+TEST(test_pio_sideset_plain) {
+    /* Side-set without optional enable: data bit always applies.
+     * 1 count @ pin 25; SET PINS,1 with ds=(data<<4)|delay. */
+    reset_cpu();
+    pio_sm_t *s = &pio_state[0].sm[0];
+    memset(s, 0, sizeof(*s));
+    s->pinctrl = (1u << 29) | (25u << 10) | (1u << 26) | (25u << 5);
+    s->execctrl = 0;
+    pio_sm_exec(0, 0, pio_enc(PIO_OP_SET, 0, (1 << 5) | 1)); /* SET PINDIRS,1 */
+    pio_sm_exec(0, 0, pio_enc(PIO_OP_SET, 0, (0 << 5) | 0)); /* SET PINS,0 */
+    ASSERT_EQ(0, gpio_get_pin(25), "baseline pin low");
+    pio_sm_exec(0, 0, pio_enc(PIO_OP_SET, 0x13, (0 << 5) | 1));
+    ASSERT_EQ(1, gpio_get_pin(25), "side-set data bit drives pin");
+    ASSERT_EQ(3, s->delay_count, "low 4 bits are delay");
+    PASS();
+}
+
+TEST(test_pio_sideset_opt) {
+    /* Optional side-set (EXECCTRL.SIDE_EN): bit4 gates application. */
+    reset_cpu();
+    pio_sm_t *s = &pio_state[0].sm[0];
+    memset(s, 0, sizeof(*s));
+    s->pinctrl = (1u << 29) | (25u << 10) | (1u << 26) | (25u << 5);
+    s->execctrl = (1u << 30);
+    pio_sm_exec(0, 0, pio_enc(PIO_OP_SET, 0, (1 << 5) | 1)); /* OE */
+    pio_sm_exec(0, 0, pio_enc(PIO_OP_SET, 0, (0 << 5) | 0)); /* OUT 0 */
+    /* NOP (mov y,y) with enable+data+delay */
+    pio_sm_exec(0, 0, pio_enc(PIO_OP_MOV, 0x1D, (2 << 5) | (0 << 3) | 2));
+    ASSERT_EQ(1, gpio_get_pin(25), "enabled side-set drives pin");
+    ASSERT_EQ(5, s->delay_count, "low 3 bits are delay");
+    /* Same data without enable bit: pin untouched, delay is low 4 bits */
+    pio_sm_exec(0, 0, pio_enc(PIO_OP_SET, 0, (0 << 5) | 0)); /* OUT 0 */
+    pio_sm_exec(0, 0, pio_enc(PIO_OP_MOV, 0x0D, (2 << 5) | (0 << 3) | 2));
+    ASSERT_EQ(0, gpio_get_pin(25), "disabled side-set leaves pin");
+    ASSERT_EQ(13, s->delay_count, "delay is full low nibble");
+    PASS();
+}
+
+TEST(test_pio_delay_burn) {
+    /* Delay field burns cycles in pio_step before the next fetch. */
+    reset_cpu();
+    pio_block_t *p = &pio_state[0];
+    memset(p, 0, sizeof(*p));
+    pio_sm_t *s = &p->sm[0];
+    s->clkdiv = (1u << 16);
+    s->execctrl = 0; /* wrap 0..0 */
+    p->ctrl = 1u;
+    p->instr_mem[0] = pio_enc(PIO_OP_SET, 3, (5 << 5) | 7); /* SET X,7 dly3 */
+    pio_step();
+    ASSERT_EQ(7u, s->x, "executes on first step");
+    ASSERT_EQ(3, s->delay_count, "delay latched");
+    ASSERT_EQ(0, (int)s->pc, "pc held during delay");
+    pio_step();
+    ASSERT_EQ(2, s->delay_count, "delay burns");
+    pio_step();
+    ASSERT_EQ(1, s->delay_count, "delay burns");
+    pio_step();
+    ASSERT_EQ(0, s->delay_count, "delay expires");
+    pio_step();
+    ASSERT_EQ(3, s->delay_count, "re-executes after delay");
+    p->ctrl = 0;
+    PASS();
+}
+
+TEST(test_pio_autopull_refill) {
+    /* OUT with autopull refills an empty OSR from TX FIFO first. */
+    reset_cpu();
+    pio_sm_t *s = &pio_state[0].sm[0];
+    memset(s, 0, sizeof(*s));
+    s->shiftctrl = (1u << 17) | (8u << 25) | (1u << 19); /* autopull, thr 8, shr */
+    s->tx_fifo.data[0] = 0xDEADBEEFu;
+    s->tx_fifo.count = 1;
+    s->osr = 0;
+    s->osr_count = 32;
+    pio_sm_exec(0, 0, pio_enc(PIO_OP_OUT, 0, (1 << 5) | 8)); /* OUT X, 8 */
+    ASSERT_EQ(0, (int)s->tx_fifo.count, "FIFO drained by refill");
+    ASSERT_EQ(0xEFu, s->x, "low 8 bits to X");
+    ASSERT_EQ(0xDEADBEu, s->osr, "OSR shifted");
+    PASS();
+}
+
+TEST(test_pio_wait_irq) {
+    /* WAIT on IRQ flag: proceeds + auto-clears when set, stalls when clear. */
+    reset_cpu();
+    pio_block_t *p = &pio_state[0];
+    pio_sm_t *s = &p->sm[0];
+    memset(s, 0, sizeof(*s));
+    p->irq = (1u << 2);
+    pio_sm_exec(0, 0, pio_enc(PIO_OP_WAIT, 0, (1 << 7) | (2 << 5) | 2));
+    ASSERT_EQ(0, s->stalled, "set IRQ flag lets WAIT pass");
+    ASSERT_EQ(0u, p->irq & (1u << 2), "IRQ flag auto-cleared");
+    pio_sm_exec(0, 0, pio_enc(PIO_OP_WAIT, 0, (1 << 7) | (2 << 5) | 2));
+    ASSERT_EQ(1, s->stalled, "clear IRQ flag stalls WAIT");
     PASS();
 }
 
@@ -6542,6 +6665,8 @@ int main(void) {
     RUN_TEST(test_uart_rx_push_pop);
     RUN_TEST(test_uart_rx_fifo_empty_flag);
     RUN_TEST(test_uart_rx_fifo_full_flag);
+    RUN_TEST(test_uart_byte_rx);
+    RUN_TEST(test_uart_subword_tx_preserves_rx);
     RUN_TEST(test_uart_rx_fifo_order);
     RUN_TEST(test_uart_rx_interrupt);
     RUN_TEST(test_uart_rx_interrupt_clear);
@@ -6617,6 +6742,11 @@ int main(void) {
     RUN_TEST(test_pio_sm_enable_step);
     RUN_TEST(test_pio_sm_restart_clears_state);
     RUN_TEST(test_pio_flevel_reflects_fifo);
+    RUN_TEST(test_pio_sideset_plain);
+    RUN_TEST(test_pio_sideset_opt);
+    RUN_TEST(test_pio_delay_burn);
+    RUN_TEST(test_pio_autopull_refill);
+    RUN_TEST(test_pio_wait_irq);
     END_CATEGORY("PIO Execution");
 
     BEGIN_CATEGORY("PIO Clock Division");

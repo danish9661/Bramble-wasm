@@ -186,8 +186,42 @@ void pio_sm_exec(int pio_num, int sm_num, uint16_t instr) {
     pio_sm_t *s = &p->sm[sm_num];
 
     uint8_t opcode = (instr >> 13) & 0x07;
-    /* delay/side-set in bits [12:8] — we ignore delay for now */
     uint8_t arg = instr & 0xFF;  /* Lower 8 bits */
+
+    /* Delay / side-set field (bits [12:8]). Layout per RP2040 datasheet:
+     * optional side-set (EXECCTRL.SIDE_EN): [4]=enable, data=[3:4-N],
+     * delay=[3-N:0]; otherwise data=[4:5-N], delay=[4-N:0]. N clamps to 5.
+     * Side-set writes pins (or pindirs with SIDE_PINDIR) every instruction
+     * that carries it; delay burns that many extra cycles afterwards. */
+    {
+        int ss_count = (s->pinctrl >> 29) & 0x07;
+        if (ss_count > 5) ss_count = 5;
+        int side_en = (s->execctrl >> 30) & 1;
+        int side_pindir = (s->execctrl >> 29) & 1;
+        uint8_t ds = (instr >> 8) & 0x1F;
+        uint8_t delay = ds;
+        if (ss_count > 0) {
+            if (side_en) {
+                if (ds & 0x10) {
+                    int n = (ss_count > 4) ? 4 : ss_count;
+                    uint8_t data = (ds >> (4 - n)) & (n == 4 ? 0xF : ((1u << n) - 1));
+                    uint8_t base = (s->pinctrl >> 10) & 0x1F;
+                    if (side_pindir) write_pindirs(base, n, data);
+                    else write_pins(base, n, data);
+                    delay = ds & ((4 - n) > 0 ? ((1u << (4 - n)) - 1) : 0);
+                } else {
+                    delay = ds & 0x0F;
+                }
+            } else {
+                uint8_t data = (ds >> (5 - ss_count)) & ((1u << ss_count) - 1);
+                uint8_t base = (s->pinctrl >> 10) & 0x1F;
+                if (side_pindir) write_pindirs(base, ss_count, data);
+                else write_pins(base, ss_count, data);
+                delay = ds & ((1u << (5 - ss_count)) - 1);
+            }
+        }
+        s->delay_count = delay;
+    }
 
     s->stalled = 0;
 
@@ -546,6 +580,13 @@ void pio_step(void) {
                 /* Re-execute same instruction to re-check condition */
                 uint16_t instr = p->instr_mem[s->pc] & 0xFFFF;
                 pio_sm_exec(b, sm, instr);
+                continue;
+            }
+
+            /* Delay cycles from the previous instruction's delay/side-set
+             * field: burn a cycle without fetching. */
+            if (s->delay_count > 0) {
+                s->delay_count--;
                 continue;
             }
 

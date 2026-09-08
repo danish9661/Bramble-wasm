@@ -1485,6 +1485,24 @@ void mem_write16(uint32_t addr, uint16_t val) {
         return;
     }
 
+    /* UART registers: DR writes push TX (low byte only, no RMW read that
+     * would pop RX); other registers RMW like GPIO. */
+    {
+        int uart_num = uart_match(addr);
+        if (uart_num >= 0) {
+            uint32_t off = addr & 0xFFFu;
+            uint32_t bo = addr & 0x2u;
+            if (off < 4u) {
+                uart_write32(uart_num, 0u, (uint32_t)val & 0xFFu);
+            } else {
+                uint32_t cur = uart_read32(uart_num, off);
+                uint32_t mask = 0xFFFFu << (bo * 8u);
+                uart_write32(uart_num, off, (cur & ~mask) | ((uint32_t)val << (bo * 8u)));
+            }
+            return;
+        }
+    }
+
     /* Stub out peripheral writes for now. */
     if (addr >= 0x40000000 && addr < 0x50000000) return;   /* APB/AHB peripherals */
     if (addr >= SIO_BASE     && addr < SIO_BASE + 0x1000) return;
@@ -1543,6 +1561,24 @@ void mem_write8(uint32_t addr, uint8_t val) {
         uint32_t new_val = (cur & ~mask8) | ((uint32_t)val << (bo * 8u));
         gpio_write32(a32, new_val);
         return;
+    }
+
+    /* UART registers: DR writes push TX (same no-RMW rule as halfword). */
+    {
+        int uart_num = uart_match(addr);
+        if (uart_num >= 0) {
+            uint32_t off = addr & 0xFFFu;
+            uint32_t bo = addr & 0x3u;
+            if (off < 4u) {
+                uart_write32(uart_num, 0u, (uint32_t)val & 0xFFu);
+            } else {
+                uint32_t a32 = off & ~0x3u;
+                uint32_t cur = uart_read32(uart_num, a32);
+                uint32_t mask8 = 0xFFu << (bo * 8u);
+                uart_write32(uart_num, a32, (cur & ~mask8) | ((uint32_t)val << (bo * 8u)));
+            }
+            return;
+        }
     }
 
     /* Stub out peripheral writes for now. */
@@ -1843,6 +1879,16 @@ uint16_t mem_read16(uint32_t addr) {
         return (uint16_t)((val32 >> (bo * 8)) & 0xFFFF);
     }
 
+    /* UART registers */
+    {
+        int uart_num = uart_match(addr);
+        if (uart_num >= 0) {
+            uint32_t val32 = uart_read32(uart_num, addr & 0xFFFu);
+            uint32_t bo = addr & 0x2u;
+            return (uint16_t)((val32 >> (bo * 8u)) & 0xFFFFu);
+        }
+    }
+
     /* No 16-bit peripheral emulation yet. */
     return 0;
 }
@@ -1893,6 +1939,16 @@ uint8_t mem_read8(uint32_t addr) {
         uint32_t val32 = usb_read32(addr & ~0x3);
         uint32_t bo = addr & 0x3;
         return (uint8_t)((val32 >> (bo * 8)) & 0xFF);
+    }
+
+    /* UART registers */
+    {
+        int uart_num = uart_match(addr);
+        if (uart_num >= 0) {
+            uint32_t val32 = uart_read32(uart_num, addr & 0xFFFu);
+            uint32_t bo = addr & 0x3u;
+            return (uint8_t)((val32 >> (bo * 8u)) & 0xFFu);
+        }
     }
 
     return 0xFF;  /* Unmapped reads return 0xFF */

@@ -137,9 +137,10 @@ typedef struct {
     uint32_t osr;           /* Output shift register */
     uint8_t  isr_count;     /* Bits shifted into ISR */
     uint8_t  osr_count;     /* Bits remaining in OSR */
-    uint8_t  pc;            /* Program counter (0-31) */
-    uint8_t  stalled;       /* SM is stalled (waiting) */
-    uint8_t  exec_pending;  /* Force-exec instruction pending */
+    uint8_t  pc;             /* Program counter (0-31) */
+    uint8_t  stalled;        /* SM is stalled (waiting) */
+    uint8_t  exec_pending;   /* Force-exec instruction pending */
+    uint8_t  delay_count;    /* Delay cycles remaining (delay/side-set field) */
 
     /* FIFOs */
     pio_fifo_t tx_fifo;     /* TX: CPU writes, SM pulls */

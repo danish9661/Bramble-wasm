@@ -132,6 +132,57 @@ echo "✓ Build complete: fp_test.uf2"
 
 ;;
 
+ws2812|ws2812_test)
+
+echo "[1/3] Compiling ws2812_test.S..."
+arm-none-eabi-gcc -mcpu=cortex-m0plus -mthumb -c ../ws2812_test.S -o ws2812_test.o
+
+echo "[2/3] Linking..."
+arm-none-eabi-ld -T ../linker.ld ws2812_test.o -o ws2812_test.elf
+
+echo "[3/3] Converting to UF2..."
+arm-none-eabi-objcopy -O binary ws2812_test.elf ws2812_test.bin
+
+python3 ../uf2conv.py ws2812_test.bin -o ../../ws2812_test.uf2 -b 0x10000100 -f 0xE48BFF56
+
+echo "✓ Build complete: ws2812_test.uf2"
+
+;;
+
+rtc|rtc_test)
+
+echo "[1/3] Compiling rtc_test.S..."
+arm-none-eabi-gcc -mcpu=cortex-m0plus -mthumb -c ../rtc_test.S -o rtc_test.o
+
+echo "[2/3] Linking..."
+arm-none-eabi-ld -T ../linker.ld rtc_test.o -o rtc_test.elf
+
+echo "[3/3] Converting to UF2..."
+arm-none-eabi-objcopy -O binary rtc_test.elf rtc_test.bin
+
+python3 ../uf2conv.py rtc_test.bin -o ../../rtc_test.uf2 -b 0x10000100 -f 0xE48BFF56
+
+echo "✓ Build complete: rtc_test.uf2"
+
+;;
+
+uart_echo|uart-echo|echo)
+
+echo "[1/3] Compiling uart_echo.S..."
+arm-none-eabi-gcc -mcpu=cortex-m0plus -mthumb -c ../uart_echo.S -o uart_echo.o
+
+echo "[2/3] Linking..."
+arm-none-eabi-ld -T ../linker.ld uart_echo.o -o uart_echo.elf
+
+echo "[3/3] Converting to UF2..."
+arm-none-eabi-objcopy -O binary uart_echo.elf uart_echo.bin
+
+python3 ../uf2conv.py uart_echo.bin -o ../../uart_echo.uf2 -b 0x10000100 -f 0xE48BFF56
+
+echo "✓ Build complete: uart_echo.uf2"
+
+;;
+
 name_prompt|prompt|name)
 
 echo "[1/3] Compiling name_prompt.S..."
@@ -217,9 +268,33 @@ arm-none-eabi-objcopy -O binary fp_test.elf fp_test.bin
 python3 ../uf2conv.py fp_test.bin -o ../../fp_test.uf2 -b 0x10000100 -f 0xE48BFF56
 echo " ✓ fp_test.uf2"
 
+# WS2812 PIO bitstream test
+echo " - Building ws2812_test.uf2..."
+arm-none-eabi-gcc -mcpu=cortex-m0plus -mthumb -c ../ws2812_test.S -o ws2812_test.o
+arm-none-eabi-ld -T ../linker.ld ws2812_test.o -o ws2812_test.elf
+arm-none-eabi-objcopy -O binary ws2812_test.elf ws2812_test.bin
+python3 ../uf2conv.py ws2812_test.bin -o ../../ws2812_test.uf2 -b 0x10000100 -f 0xE48BFF56
+echo " ✓ ws2812_test.uf2"
+
+# RTC readout test
+echo " - Building rtc_test.uf2..."
+arm-none-eabi-gcc -mcpu=cortex-m0plus -mthumb -c ../rtc_test.S -o rtc_test.o
+arm-none-eabi-ld -T ../linker.ld rtc_test.o -o rtc_test.elf
+arm-none-eabi-objcopy -O binary rtc_test.elf rtc_test.bin
+python3 ../uf2conv.py rtc_test.bin -o ../../rtc_test.uf2 -b 0x10000100 -f 0xE48BFF56
+echo " ✓ rtc_test.uf2"
+
+# UART echo test
+echo " - Building uart_echo.uf2..."
+arm-none-eabi-gcc -mcpu=cortex-m0plus -mthumb -c ../uart_echo.S -o uart_echo.o
+arm-none-eabi-ld -T ../linker.ld uart_echo.o -o uart_echo.elf
+arm-none-eabi-objcopy -O binary uart_echo.elf uart_echo.bin
+python3 ../uf2conv.py uart_echo.bin -o ../../uart_echo.uf2 -b 0x10000100 -f 0xE48BFF56
+echo " ✓ uart_echo.uf2"
+
 echo ""
 
-echo "✓ All firmware built successfully (8/8)"
+echo "✓ All firmware built successfully (11/11)"
 
 ;;
 
@@ -236,6 +311,9 @@ echo " name_prompt - Build interactive UART stdin test"
 echo " clocks - Build clocks register readout test"
 echo " psm - Build PSM register readout test"
 echo " fp - Build softfloat double (0.1+0.2) test"
+echo " ws2812 - Build PIO WS2812 bitstream test"
+echo " rtc - Build RTC readout test"
+echo " uart_echo - Build UART echo test"
 echo " all - Build all tests"
 echo ""
 
