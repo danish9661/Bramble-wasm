@@ -111,3 +111,7 @@ jobs:
           kill $EMU 2>/dev/null; wait 2>/dev/null || true
           grep -q "Breakpoint 1, .* in main" /tmp/gdb.log && echo "gdb main-break PASS"
           grep -q "stdio_init_all\|main" /tmp/gdb.log && echo "gdb step PASS"
+      - name: ELF symbols sanity (hello_usb.elf must match the UF2)
+        run: |
+          nm web/hello_usb.elf | grep -qE " [Tt] main$" && echo "elf main PASS"
+          nm web/hello_usb.elf | grep -qE " tud_cdc_n_read$" && echo "elf tud_cdc PASS"
